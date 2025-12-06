@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <ArduinoJson.h>
 #include "driver/i2s.h"
 
 #include "../include/secrets.h"
@@ -239,14 +240,50 @@ void recordAndStreamUpload() {
     }
   }
 
-  // Read response
+  // Read HTTP headers until we find the JSON body
+  String jsonResponse = "";
+  bool headersComplete = false;
+  bool foundJson = false;
+  
   while (client.available()) {
     String line = client.readStringUntil('\n');
-    Serial.println(line);
+    line.trim();
+    
+    if (!headersComplete) {
+      // Empty line signals end of headers
+      if (line.length() == 0) {
+        headersComplete = true;
+      }
+    } else {
+      // We're in the body now
+      if (line.startsWith("{") && line.indexOf("\"text\"") > 0) {
+        jsonResponse = line;
+        foundJson = true;
+        break;
+      }
+    }
   }
 
   uint32_t responseTime = millis() - responseStart;
   uint32_t totalTime = millis() - startTime;
+  
+  // Parse and display the transcription using ArduinoJson
+  if (foundJson) {
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(doc, jsonResponse);
+    
+    if (error) {
+      Serial.print("JSON parse error: ");
+      Serial.println(error.c_str());
+    } else if (doc.containsKey("text")) {
+      const char* transcription = doc["text"];
+      Serial.println("\n=== Transcription ===");
+      Serial.println(transcription);
+      Serial.println("=====================\n");
+    }
+  } else {
+    Serial.println("No transcription received");
+  }
   
   Serial.print("Response time: ");
   Serial.print(responseTime);
