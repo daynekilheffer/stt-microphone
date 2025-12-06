@@ -17,18 +17,18 @@ const char* POST_URL = "http://10.0.0.17:7878";
   #define LED_PIN LED_BUILTIN
   #define BUTTON_PIN 7
 #elif defined(BOARD_SEEED_XIAO_ESP32C3)
-  #define I2S_WS  D3    // LRCLK
-  #define I2S_SD  D2    // DOUT
-  #define I2S_SCK D1    // BCLK
+  #define I2S_WS  3    // LRCLK
+  #define I2S_SD  20   // DOUT
+  #define I2S_SCK 8    // BCLK
   #define LED_PIN D10
-  #define BUTTON_PIN D7
+  #define BUTTON_PIN 5
 #else
   #error "Please define board type"
 #endif
 
 // Audio settings
-#define SAMPLE_RATE    16000
-#define MAX_SECONDS    2
+#define SAMPLE_RATE    8000   // Reduced from 16000 for longer recording
+#define MAX_SECONDS    10
 #define MAX_SAMPLES    (SAMPLE_RATE * MAX_SECONDS)
 #define MAX_BYTES      (MAX_SAMPLES * sizeof(int16_t))
 
@@ -56,15 +56,13 @@ void setup() {
   i2s_config_t i2s_config = {
     .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
     .sample_rate = SAMPLE_RATE,
-    .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+    .bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT,
     .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
     .communication_format = I2S_COMM_FORMAT_STAND_I2S,
     .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
     .dma_buf_count = 8,
-    .dma_buf_len = 512,
-    .use_apll = false,
-    .tx_desc_auto_clear = false,
-    .fixed_mclk = 0
+    .dma_buf_len = 256,
+    .use_apll = false
   };
 
   i2s_pin_config_t pin_config = {
@@ -108,6 +106,17 @@ void addWavHeader(uint8_t* buffer, uint32_t dataSize) {
   memcpy(buffer + 40, &dataSize, 4);
 }
 
+// -------------------- RMS CALCULATION -------------------
+float calculateRMS(const int16_t* samples, size_t numSamples) {
+  if (numSamples == 0) return 0.0f;
+  
+  double sumSquares = 0;
+  for (size_t i = 0; i < numSamples; ++i) {
+    sumSquares += samples[i] * samples[i];
+  }
+  return sqrt(sumSquares / numSamples);
+}
+
 // -------------------- RECORD LOOP -----------------------
 size_t recordWhileButtonHeld() {
   Serial.println("Recording...");
@@ -115,11 +124,13 @@ size_t recordWhileButtonHeld() {
 
   size_t totalBytes = 0;
   size_t bytesRead = 0;
+  int32_t i2sBuffer[128];  // Temporary buffer for 32-bit samples
 
   uint32_t start = millis();
 
   // Start writing audio after WAV header space
-  uint8_t* writePtr = audioBuffer + 44;
+  int16_t* samples = (int16_t*)(audioBuffer + 44);
+  size_t sampleCount = 0;
 
   while (digitalRead(BUTTON_PIN) == LOW) {
 
@@ -130,20 +141,40 @@ size_t recordWhileButtonHeld() {
     }
 
     // Stop if buffer would overflow
-    if (totalBytes + 512 >= MAX_BYTES) {
+    if (sampleCount >= MAX_SAMPLES) {
       Serial.println("Max buffer used.");
       break;
     }
 
-    // Read audio sample chunk
-    i2s_read(I2S_NUM_0, writePtr + totalBytes, 512, &bytesRead, portMAX_DELAY);
-    totalBytes += bytesRead;
+    // Read 32-bit I2S samples
+    i2s_read(I2S_NUM_0, i2sBuffer, sizeof(i2sBuffer), &bytesRead, portMAX_DELAY);
+    
+    // Convert 32-bit samples to 16-bit by shifting down
+    size_t samplesRead = bytesRead / sizeof(int32_t);
+    for (size_t i = 0; i < samplesRead && sampleCount < MAX_SAMPLES; i++) {
+      // Shift right 14 bits to get 18-bit data into 16-bit range
+      samples[sampleCount++] = (int16_t)(i2sBuffer[i] >> 14);
+    }
+    
+    totalBytes = sampleCount * sizeof(int16_t);
   }
 
   digitalWrite(LED_PIN, LOW);
 
   Serial.print("Recording stopped. Bytes captured: ");
   Serial.println(totalBytes);
+
+  // Calculate and display RMS to verify audio was captured
+  if (totalBytes > 0) {
+    size_t numSamples = totalBytes / sizeof(int16_t);
+    float rms = calculateRMS(samples, numSamples);
+    Serial.print("RMS level: ");
+    Serial.println(rms);
+    
+    if (rms < 10.0f) {
+      Serial.println("WARNING: RMS is very low - check microphone!");
+    }
+  }
 
   return totalBytes;
 }
