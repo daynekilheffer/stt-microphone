@@ -3,6 +3,7 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include "driver/i2s.h"
+#include "esp_sleep.h"
 
 #include "../include/secrets.h"
 
@@ -12,6 +13,8 @@ const char* STT_ENDPOINT_PROTOCOL = "http";
 const char* STT_ENDPOINT_HOST = "10.0.0.17";
 const int   STT_ENDPOINT_PORT = 7878;
 const char* STT_ENDPOINT_PATH = "/stream";
+
+#define SLEEP_TIMEOUT_MS 10000  // 10 seconds of inactivity
 
 // I2S mic pins
 #if defined(BOARD_QTPY_ESP32C3)
@@ -39,13 +42,24 @@ const char* STT_ENDPOINT_PATH = "/stream";
 // Add 44 bytes for WAV header
 uint8_t audioBuffer[MAX_BYTES + 44];
 
-// ----------------------------------------------------
+uint32_t lastActivityTime = 0;
 
 void setup() {
   Serial.begin(115200);
 
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   pinMode(LED_PIN, OUTPUT);
+
+  // Configure wake up source for ESP32-C3 deep sleep
+  // Use RTC GPIO wakeup - wakes when GPIO goes LOW (button press)
+  uint64_t wakeup_pin_mask = (1ULL << BUTTON_PIN);
+  esp_deep_sleep_enable_gpio_wakeup(wakeup_pin_mask, ESP_GPIO_WAKEUP_GPIO_LOW);
+
+  // Check if we woke from deep sleep
+  esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
+  if (wakeup_reason == ESP_SLEEP_WAKEUP_GPIO) {
+    Serial.println("Woke from deep sleep via button");
+  }
 
   // WiFi
   WiFi.begin(WIFI_SSID, WIFI_PASS);
@@ -81,6 +95,9 @@ void setup() {
   i2s_zero_dma_buffer(I2S_NUM_0);
 
   Serial.println("Setup complete.");
+  
+  // Initialize last activity time
+  lastActivityTime = millis();
 }
 
 // ------------------- WAV HEADER --------------------
@@ -275,7 +292,7 @@ void recordAndStreamUpload() {
     if (error) {
       Serial.print("JSON parse error: ");
       Serial.println(error.c_str());
-    } else if (doc.containsKey("text")) {
+    } else if (!doc["text"].isNull()) {
       const char* transcription = doc["text"];
       Serial.println("\n=== Transcription ===");
       Serial.println(transcription);
@@ -302,8 +319,25 @@ void loop() {
     delay(30);  // debounce
 
     if (digitalRead(BUTTON_PIN) == LOW) {
+      lastActivityTime = millis();  // Update activity time
       recordAndStreamUpload();
       delay(500);
+      lastActivityTime = millis();  // Update after completion
     }
   }
+
+  // Check for inactivity timeout
+  if (millis() - lastActivityTime > SLEEP_TIMEOUT_MS) {
+    Serial.println("Entering deep sleep due to inactivity...");
+    Serial.flush();  // Make sure message is sent
+    delay(100);
+    
+    // Turn off LED
+    digitalWrite(LED_PIN, LOW);
+    
+    // Enter deep sleep
+    esp_deep_sleep_start();
+  }
+  
+  delay(100);  // Small delay to avoid busy loop
 }
