@@ -7,7 +7,10 @@
 
 // ---------------------- CONFIG ----------------------
 
-const char* POST_URL = "http://10.0.0.17:7878/stream";
+const char* STT_ENDPOINT_PROTOCOL = "http";
+const char* STT_ENDPOINT_HOST = "10.0.0.17";
+const int   STT_ENDPOINT_PORT = 7878;
+const char* STT_ENDPOINT_PATH = "/stream";
 
 // I2S mic pins
 #if defined(BOARD_QTPY_ESP32C3)
@@ -128,33 +131,9 @@ void recordAndStreamUpload() {
   Serial.println("Recording & streaming...");
   digitalWrite(LED_PIN, HIGH);
 
-  // Parse URL
-  String url = String(POST_URL);
-  String host = "";
-  int port = 80;
-  String path = "/";
-  
-  // Extract host and port from URL
-  int idx = url.indexOf("://");
-  if (idx >= 0) {
-    url = url.substring(idx + 3);
-  }
-  idx = url.indexOf('/');
-  if (idx >= 0) {
-    path = url.substring(idx);
-    host = url.substring(0, idx);
-  } else {
-    host = url;
-  }
-  idx = host.indexOf(':');
-  if (idx >= 0) {
-    port = host.substring(idx + 1).toInt();
-    host = host.substring(0, idx);
-  }
-
   // Connect to server
   WiFiClient client;
-  if (!client.connect(host.c_str(), port)) {
+  if (!client.connect(STT_ENDPOINT_HOST, STT_ENDPOINT_PORT)) {
     Serial.println("Connection failed");
     digitalWrite(LED_PIN, LOW);
     return;
@@ -170,10 +149,10 @@ void recordAndStreamUpload() {
 
   // Send HTTP headers with chunked encoding
   client.print("POST ");
-  client.print(path);
+  client.print(STT_ENDPOINT_PATH);
   client.println(" HTTP/1.1");
   client.print("Host: ");
-  client.println(host);
+  client.println(STT_ENDPOINT_HOST);
   client.println("Content-Type: audio/wav");
   client.println("Transfer-Encoding: chunked");
   client.println("Connection: close");
@@ -189,7 +168,8 @@ void recordAndStreamUpload() {
   client.print("\r\n");
 
   // Record and stream audio data as chunks
-  while (digitalRead(BUTTON_PIN) == LOW) {
+  bool recording = true;
+  while (recording) {
     // Stop if max time reached
     if (millis() - recordStart > (MAX_SECONDS * 1000UL)) {
       Serial.println("Max recording time reached.");
@@ -214,7 +194,7 @@ void recordAndStreamUpload() {
       sampleCount++;
     }
     
-    // Stream chunk to server using chunked encoding
+    // Send the chunk if we have data
     if (samplesToWrite > 0) {
       size_t chunkBytes = samplesToWrite * sizeof(int16_t);
       
@@ -225,6 +205,11 @@ void recordAndStreamUpload() {
       client.print("\r\n");
       
       totalBytes += chunkBytes;
+    }
+    
+    // Check button state AFTER processing the data
+    if (digitalRead(BUTTON_PIN) != LOW) {
+      recording = false;
     }
   }
 
