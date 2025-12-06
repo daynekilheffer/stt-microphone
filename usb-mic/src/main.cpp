@@ -7,7 +7,7 @@
 
 // ---------------------- CONFIG ----------------------
 
-const char* POST_URL = "http://10.0.0.17:7878";
+const char* POST_URL = "http://10.0.0.17:7878/stream";
 
 // I2S mic pins
 #if defined(BOARD_QTPY_ESP32C3)
@@ -117,32 +117,88 @@ float calculateRMS(const int16_t* samples, size_t numSamples) {
   return sqrt(sumSquares / numSamples);
 }
 
-// -------------------- RECORD LOOP -----------------------
-size_t recordWhileButtonHeld() {
-  Serial.println("Recording...");
+// -------------------- STREAMING RECORD & UPLOAD -----------------------
+void recordAndStreamUpload() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi lost.");
+    return;
+  }
+
+  uint32_t startTime = millis();
+  Serial.println("Recording & streaming...");
   digitalWrite(LED_PIN, HIGH);
+
+  // Parse URL
+  String url = String(POST_URL);
+  String host = "";
+  int port = 80;
+  String path = "/";
+  
+  // Extract host and port from URL
+  int idx = url.indexOf("://");
+  if (idx >= 0) {
+    url = url.substring(idx + 3);
+  }
+  idx = url.indexOf('/');
+  if (idx >= 0) {
+    path = url.substring(idx);
+    host = url.substring(0, idx);
+  } else {
+    host = url;
+  }
+  idx = host.indexOf(':');
+  if (idx >= 0) {
+    port = host.substring(idx + 1).toInt();
+    host = host.substring(0, idx);
+  }
+
+  // Connect to server
+  WiFiClient client;
+  if (!client.connect(host.c_str(), port)) {
+    Serial.println("Connection failed");
+    digitalWrite(LED_PIN, LOW);
+    return;
+  }
+  Serial.println("Connected to server.");
 
   size_t totalBytes = 0;
   size_t bytesRead = 0;
-  int32_t i2sBuffer[128];  // Temporary buffer for 32-bit samples
-
-  uint32_t start = millis();
-
-  // Start writing audio after WAV header space
-  int16_t* samples = (int16_t*)(audioBuffer + 44);
+  int32_t i2sBuffer[128];
+  int16_t audioChunk[128];
+  uint32_t recordStart = millis();
   size_t sampleCount = 0;
 
-  while (digitalRead(BUTTON_PIN) == LOW) {
+  // Send HTTP headers with chunked encoding
+  client.print("POST ");
+  client.print(path);
+  client.println(" HTTP/1.1");
+  client.print("Host: ");
+  client.println(host);
+  client.println("Content-Type: audio/wav");
+  client.println("Transfer-Encoding: chunked");
+  client.println("Connection: close");
+  client.println();
 
+  // Prepare WAV header (we'll update size later, but send placeholder)
+  uint8_t wavHeader[44];
+  addWavHeader(wavHeader, 0);  // Placeholder size
+  
+  // Send WAV header as first chunk
+  client.printf("%X\r\n", 44);
+  client.write(wavHeader, 44);
+  client.print("\r\n");
+
+  // Record and stream audio data as chunks
+  while (digitalRead(BUTTON_PIN) == LOW) {
     // Stop if max time reached
-    if (millis() - start > (MAX_SECONDS * 1000UL)) {
+    if (millis() - recordStart > (MAX_SECONDS * 1000UL)) {
       Serial.println("Max recording time reached.");
       break;
     }
 
     // Stop if buffer would overflow
     if (sampleCount >= MAX_SAMPLES) {
-      Serial.println("Max buffer used.");
+      Serial.println("Max samples reached.");
       break;
     }
 
@@ -151,57 +207,70 @@ size_t recordWhileButtonHeld() {
     
     // Convert 32-bit samples to 16-bit by shifting down
     size_t samplesRead = bytesRead / sizeof(int32_t);
+    size_t samplesToWrite = 0;
+    
     for (size_t i = 0; i < samplesRead && sampleCount < MAX_SAMPLES; i++) {
-      // Shift right 14 bits to get 18-bit data into 16-bit range
-      samples[sampleCount++] = (int16_t)(i2sBuffer[i] >> 14);
+      audioChunk[samplesToWrite++] = (int16_t)(i2sBuffer[i] >> 14);
+      sampleCount++;
     }
     
-    totalBytes = sampleCount * sizeof(int16_t);
+    // Stream chunk to server using chunked encoding
+    if (samplesToWrite > 0) {
+      size_t chunkBytes = samplesToWrite * sizeof(int16_t);
+      
+      // Write chunk size in hex
+      client.printf("%X\r\n", chunkBytes);
+      // Write chunk data
+      client.write((uint8_t*)audioChunk, chunkBytes);
+      client.print("\r\n");
+      
+      totalBytes += chunkBytes;
+    }
   }
+
+  uint32_t recordStop = millis();
+  uint32_t recordDuration = recordStop - recordStart;
+
+  // Send final zero-length chunk to signal end
+  client.println("0");
+  client.println();
 
   digitalWrite(LED_PIN, LOW);
 
-  Serial.print("Recording stopped. Bytes captured: ");
+  Serial.print("Recording stopped. Bytes streamed: ");
   Serial.println(totalBytes);
+  Serial.print("Record duration: ");
+  Serial.print(recordDuration);
+  Serial.println(" ms");
 
-  // Calculate and display RMS to verify audio was captured
-  if (totalBytes > 0) {
-    size_t numSamples = totalBytes / sizeof(int16_t);
-    float rms = calculateRMS(samples, numSamples);
-    Serial.print("RMS level: ");
-    Serial.println(rms);
-    
-    if (rms < 10.0f) {
-      Serial.println("WARNING: RMS is very low - check microphone!");
+  // Wait for response
+  uint32_t responseStart = millis();
+  unsigned long timeout = millis();
+  while (client.available() == 0) {
+    if (millis() - timeout > 5000) {
+      Serial.println("Response timeout");
+      client.stop();
+      return;
     }
   }
 
-  return totalBytes;
-}
-
-// ------------------------ POST ---------------------
-void postAudio(uint8_t* data, size_t len) {
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("WiFi lost.");
-    return;
+  // Read response
+  while (client.available()) {
+    String line = client.readStringUntil('\n');
+    Serial.println(line);
   }
 
-  HTTPClient http;
-  http.begin(POST_URL);
-  http.addHeader("Content-Type", "audio/wav");
+  uint32_t responseTime = millis() - responseStart;
+  uint32_t totalTime = millis() - startTime;
+  
+  Serial.print("Response time: ");
+  Serial.print(responseTime);
+  Serial.println(" ms");
+  Serial.print("Total time: ");
+  Serial.print(totalTime);
+  Serial.println(" ms");
 
-  Serial.println("Uploading...");
-
-  int code = http.POST(data, len);
-
-  Serial.print("HTTP response: ");
-  Serial.println(code);
-
-  if (code > 0) {
-    Serial.println(http.getString());
-  }
-
-  http.end();
+  client.stop();
 }
 
 // ------------------------- LOOP --------------------------
@@ -211,14 +280,7 @@ void loop() {
     delay(30);  // debounce
 
     if (digitalRead(BUTTON_PIN) == LOW) {
-      size_t captured = recordWhileButtonHeld();
-
-      // Add WAV header
-      addWavHeader(audioBuffer, captured);
-
-      // Send WAV file
-      postAudio(audioBuffer, captured + 44);
-
+      recordAndStreamUpload();
       delay(500);
     }
   }
