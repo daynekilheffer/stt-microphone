@@ -94,36 +94,6 @@ func main() {
 
 	// Streaming endpoint
 	mux.HandleFunc("/stream", func(w http.ResponseWriter, r *http.Request) {
-		// Set headers for SSE
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
-		w.Header().Set("Connection", "keep-alive")
-		w.Header().Set("X-Accel-Buffering", "no")
-
-		flusher, ok := w.(http.Flusher)
-		if !ok {
-			http.Error(w, "streaming not supported", http.StatusInternalServerError)
-			return
-		}
-
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			http.Error(w, "failed to read request body", http.StatusBadRequest)
-			return
-		}
-
-		// Save audio file with unique timestamp-based filename
-		timestamp := time.Now().Format("20060102-150405.000")
-		filename := fmt.Sprintf("audio-%s.wav", timestamp)
-		filepath := filepath.Join(outputDir, filename)
-
-		if err := os.WriteFile(filepath, body, 0644); err != nil {
-			slog.Error("failed to write audio file", "error", err, "path", filepath)
-			http.Error(w, "failed to save audio file", http.StatusInternalServerError)
-			return
-		}
-		slog.Info("saved audio file for streaming", "path", filepath, "size", len(body))
-
 		start := time.Now()
 		stream, err := client.StreamingRecognize(r.Context())
 		if err != nil {
@@ -150,30 +120,64 @@ func main() {
 			return
 		}
 
-		// Send audio in chunks
-		chunkSize := 8192
-		for i := 0; i < len(body); i += chunkSize {
-			end := i + chunkSize
-			if end > len(body) {
-				end = len(body)
-			}
+		// Stream audio chunks from request body directly to STT
+		// Also save to file
+		timestamp := time.Now().Format("20060102-150405.000")
+		filename := fmt.Sprintf("audio-%s.wav", timestamp)
+		filepath := filepath.Join(outputDir, filename)
+		file, err := os.Create(filepath)
+		if err != nil {
+			slog.Error("failed to create audio file", "error", err)
+			http.Error(w, "failed to create audio file", http.StatusInternalServerError)
+			return
+		}
+		defer file.Close()
 
-			if err := stream.Send(&speechpb.StreamingRecognizeRequest{
-				StreamingRequest: &speechpb.StreamingRecognizeRequest_Audio{
-					Audio: body[i:end],
-				},
-			}); err != nil {
-				slog.Error("failed to send audio chunk", "error", err)
+		chunkSize := 8192
+		buffer := make([]byte, chunkSize)
+		totalBytes := 0
+
+		for {
+			n, err := r.Body.Read(buffer)
+			if n > 0 {
+				totalBytes += n
+				chunk := buffer[:n]
+
+				// Write to file
+				if _, writeErr := file.Write(chunk); writeErr != nil {
+					slog.Error("failed to write to audio file", "error", writeErr)
+				}
+
+				// Send to STT stream
+				if sendErr := stream.Send(&speechpb.StreamingRecognizeRequest{
+					StreamingRequest: &speechpb.StreamingRecognizeRequest_Audio{
+						Audio: chunk,
+					},
+				}); sendErr != nil {
+					slog.Error("failed to send audio chunk", "error", sendErr)
+					http.Error(w, "failed to send audio chunk", http.StatusInternalServerError)
+					return
+				}
+			}
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				slog.Error("failed to read request body", "error", err)
+				http.Error(w, "failed to read request body", http.StatusInternalServerError)
 				return
 			}
 		}
+
+		slog.Info("saved audio file for streaming", "path", filepath, "size", totalBytes)
 
 		if err := stream.CloseSend(); err != nil {
 			slog.Error("failed to close send", "error", err)
 			return
 		}
 
-		// Receive and stream results
+		// Collect all final results
+		var finalResults []*speechpb.StreamingRecognitionResult
 		for {
 			resp, err := stream.Recv()
 			if err == io.EOF {
@@ -181,29 +185,32 @@ func main() {
 			}
 			if err != nil {
 				slog.Error("failed to receive stream response", "error", err)
-				fmt.Fprintf(w, "event: error\ndata: %s\n\n", err.Error())
-				flusher.Flush()
+				http.Error(w, "failed to receive stream response", http.StatusInternalServerError)
 				return
 			}
 
-			// Send each result as an SSE event
+			// Collect only final results
 			for _, result := range resp.Results {
-				data, err := json.Marshal(map[string]any{
-					"result":  result,
-					"isFinal": result.IsFinal,
-				})
-				if err != nil {
-					slog.Error("failed to marshal result", "error", err)
-					continue
+				slog.Info("result", slog.Bool("isFinal", result.IsFinal), slog.Any("alternatives", result.Alternatives))
+				if result.IsFinal {
+					finalResults = append(finalResults, result)
 				}
-				fmt.Fprintf(w, "data: %s\n\n", data)
-				flusher.Flush()
 			}
 		}
 
-		slog.Info("streaming recognition completed", "duration", time.Since(start))
-		fmt.Fprintf(w, "event: done\ndata: {}\n\n")
-		flusher.Flush()
+		slog.Info("streaming recognition completed", "duration", time.Since(start), "results", len(finalResults))
+
+		// Send all results as single JSON response
+		data, err := json.Marshal(map[string]any{
+			"results": finalResults,
+		})
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write(data)
 	})
 
 	if err := http.ListenAndServe(":7878", mux); err != nil {
