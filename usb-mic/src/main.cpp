@@ -3,23 +3,32 @@
 #include <HTTPClient.h>
 #include "driver/i2s.h"
 
+#include "../include/secrets.h"
+
 // ---------------------- CONFIG ----------------------
-const char* WIFI_SSID = "yourSSID";
-const char* WIFI_PASS = "yourPASS";
 
-const char* POST_URL = "https://your-endpoint.com/audio";
-
-#define BUTTON_PIN 7
-#define LED_PIN 13
+const char* POST_URL = "http://10.0.0.17:7878";
 
 // I2S mic pins
-#define I2S_WS  1    // LRCLK
-#define I2S_SD  4    // DOUT
-#define I2S_SCK 3    // BCLK
+#if defined(BOARD_QTPY_ESP32C3)
+  #define I2S_WS  1    // LRCLK
+  #define I2S_SD  4    // DOUT
+  #define I2S_SCK 3    // BCLK
+  #define LED_PIN LED_BUILTIN
+  #define BUTTON_PIN 7
+#elif defined(BOARD_SEEED_XIAO_ESP32C3)
+  #define I2S_WS  D3    // LRCLK
+  #define I2S_SD  D2    // DOUT
+  #define I2S_SCK D1    // BCLK
+  #define LED_PIN D10
+  #define BUTTON_PIN D7
+#else
+  #error "Please define board type"
+#endif
 
 // Audio settings
 #define SAMPLE_RATE    16000
-#define MAX_SECONDS    5
+#define MAX_SECONDS    2
 #define MAX_SAMPLES    (SAMPLE_RATE * MAX_SECONDS)
 #define MAX_BYTES      (MAX_SAMPLES * sizeof(int16_t))
 
