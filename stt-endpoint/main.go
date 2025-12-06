@@ -177,7 +177,7 @@ func main() {
 		}
 
 		// Collect all final results
-		var finalResults []*speechpb.StreamingRecognitionResult
+		var finalResults *speechpb.StreamingRecognitionResult
 		for {
 			resp, err := stream.Recv()
 			if err == io.EOF {
@@ -193,16 +193,17 @@ func main() {
 			for _, result := range resp.Results {
 				slog.Info("result", slog.Bool("isFinal", result.IsFinal), slog.Any("alternatives", result.Alternatives))
 				if result.IsFinal {
-					finalResults = append(finalResults, result)
+					finalResults = result
+					break
 				}
 			}
 		}
 
-		slog.Info("streaming recognition completed", "duration", time.Since(start), "results", len(finalResults))
+		slog.Info("streaming recognition completed", "duration", time.Since(start), "results", finalResults)
 
 		// Send all results as single JSON response
 		data, err := json.Marshal(map[string]any{
-			"results": finalResults,
+			"text": finalResults.Alternatives[0].Transcript,
 		})
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
