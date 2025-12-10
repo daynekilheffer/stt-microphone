@@ -80,8 +80,8 @@ func main() {
 			return
 		}
 		slog.Info("recognized speech", "duration", time.Since(start), "results", len(resp.Results))
-		b, err := json.Marshal(map[string]any{
-			"results": resp.Results,
+		data, err := json.Marshal(map[string]any{
+			"text": resp.Results[0].Alternatives[0].Transcript,
 		})
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -89,7 +89,7 @@ func main() {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write(b)
+		w.Write(data)
 	})
 
 	// Streaming endpoint
