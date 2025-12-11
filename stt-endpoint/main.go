@@ -41,7 +41,10 @@ func main() {
 		panic(err)
 	}
 	defer client.Close()
-	// slog.Info("len", "key", len(inputFile))
+
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -223,7 +226,13 @@ func main() {
 		w.Write(data)
 	})
 
-	if err := http.ListenAndServe(":7878", mux); err != nil {
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "7878"
+	}
+
+	slog.Info("starting server", "port", port)
+	if err := http.ListenAndServe(":"+port, mux); err != nil {
 		panic(err)
 	}
 }
