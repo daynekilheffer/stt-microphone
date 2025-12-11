@@ -4,6 +4,9 @@
 #include <ArduinoJson.h>
 #include "driver/i2s.h"
 #include "esp_sleep.h"
+#include <BLEDevice.h>
+#include <BLEClient.h>
+#include <BLEUtils.h>
 
 #include "../include/secrets.h"
 
@@ -13,6 +16,11 @@ const char* STT_ENDPOINT_PROTOCOL = "http";
 const char* STT_ENDPOINT_HOST = "10.0.0.17";
 const int   STT_ENDPOINT_PORT = 7878;
 const char* STT_ENDPOINT_PATH = "/stream";
+
+// BLE configuration
+#define BLE_SERVER_NAME "ESP32 Keyboard Server"
+#define SERVICE_UUID "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
+#define CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
 
 #define SLEEP_TIMEOUT_MS 10000  // 10 seconds of inactivity
 
@@ -24,8 +32,8 @@ const char* STT_ENDPOINT_PATH = "/stream";
 #define BUTTON_PIN 5
 
 // Audio settings
-#define SAMPLE_RATE    8000   // Reduced from 16000 for longer recording
-#define MAX_SECONDS    10
+#define SAMPLE_RATE    8000   // 8kHz sample rate
+#define MAX_SECONDS    3      // Max 3 seconds (streaming, so buffer is just a safety limit)
 #define MAX_SAMPLES    (SAMPLE_RATE * MAX_SECONDS)
 #define MAX_BYTES      (MAX_SAMPLES * sizeof(int16_t))
 
@@ -33,6 +41,92 @@ const char* STT_ENDPOINT_PATH = "/stream";
 uint8_t audioBuffer[MAX_BYTES + 44];
 
 uint32_t lastActivityTime = 0;
+
+// BLE client variables
+BLEClient* pClient = nullptr;
+BLERemoteCharacteristic* pRemoteCharacteristic = nullptr;
+bool bleConnected = false;
+BLEAdvertisedDevice* bleServerDevice = nullptr;
+
+// BLE callbacks
+class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
+  void onResult(BLEAdvertisedDevice advertisedDevice) {
+    if (advertisedDevice.haveName() && advertisedDevice.getName() == BLE_SERVER_NAME) {
+      Serial.print("Found BLE keyboard server: ");
+      Serial.println(advertisedDevice.toString().c_str());
+      bleServerDevice = new BLEAdvertisedDevice(advertisedDevice);
+      BLEDevice::getScan()->stop();
+    }
+  }
+};
+
+class MyClientCallback : public BLEClientCallbacks {
+  void onConnect(BLEClient* pclient) {
+    bleConnected = true;
+    Serial.println("BLE connected");
+  }
+
+  void onDisconnect(BLEClient* pclient) {
+    bleConnected = false;
+    Serial.println("BLE disconnected");
+  }
+};
+
+bool connectToBLEServer() {
+  if (bleServerDevice == nullptr) {
+    Serial.println("No BLE server device found");
+    return false;
+  }
+
+  Serial.print("Connecting to BLE server: ");
+  Serial.println(bleServerDevice->getAddress().toString().c_str());
+
+  pClient = BLEDevice::createClient();
+  pClient->setClientCallbacks(new MyClientCallback());
+
+  if (!pClient->connect(bleServerDevice)) {
+    Serial.println("Failed to connect to BLE server");
+    return false;
+  }
+
+  Serial.println("Connected to BLE server");
+
+  BLERemoteService* pRemoteService = pClient->getService(SERVICE_UUID);
+  if (pRemoteService == nullptr) {
+    Serial.println("Failed to find service UUID");
+    pClient->disconnect();
+    return false;
+  }
+
+  pRemoteCharacteristic = pRemoteService->getCharacteristic(CHARACTERISTIC_UUID);
+  if (pRemoteCharacteristic == nullptr) {
+    Serial.println("Failed to find characteristic UUID");
+    pClient->disconnect();
+    return false;
+  }
+
+  Serial.println("BLE characteristic ready");
+  bleConnected = true;
+  return true;
+}
+
+void sendTextViaBLE(const char* text) {
+  if (!bleConnected || pRemoteCharacteristic == nullptr) {
+    Serial.println("BLE not connected, attempting to connect...");
+    if (!connectToBLEServer()) {
+      Serial.println("Failed to connect to BLE server");
+      return;
+    }
+  }
+
+  try {
+    pRemoteCharacteristic->writeValue(text, strlen(text));
+    Serial.println("Text sent via BLE");
+  } catch (...) {
+    Serial.println("Failed to send text via BLE");
+    bleConnected = false;
+  }
+}
 
 void setup() {
   Serial.begin(SERIAL_BAUD);
@@ -83,6 +177,24 @@ void setup() {
   i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
   i2s_set_pin(I2S_NUM_0, &pin_config);
   i2s_zero_dma_buffer(I2S_NUM_0);
+
+  // Initialize BLE
+  Serial.println("Initializing BLE client...");
+  BLEDevice::init("");
+  BLEScan* pBLEScan = BLEDevice::getScan();
+  pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
+  pBLEScan->setActiveScan(true);
+  pBLEScan->setInterval(100);
+  pBLEScan->setWindow(99);
+  
+  Serial.println("Scanning for BLE keyboard server...");
+  pBLEScan->start(5, false);
+  
+  if (bleServerDevice != nullptr) {
+    connectToBLEServer();
+  } else {
+    Serial.println("BLE keyboard server not found");
+  }
 
   Serial.println("Setup complete.");
   
@@ -287,6 +399,9 @@ void recordAndStreamUpload() {
       Serial.println("\n=== Transcription ===");
       Serial.println(transcription);
       Serial.println("=====================\n");
+      
+      // Send transcription via BLE
+      sendTextViaBLE(transcription);
     }
   } else {
     Serial.println("No transcription received");
