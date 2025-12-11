@@ -17,13 +17,7 @@ const char* STT_ENDPOINT_PATH = "/stream";
 #define SLEEP_TIMEOUT_MS 10000  // 10 seconds of inactivity
 
 // I2S mic pins
-#if defined(BOARD_QTPY_ESP32C3)
-  #define I2S_WS  1    // LRCLK
-  #define I2S_SD  4    // DOUT
-  #define I2S_SCK 3    // BCLK
-  #define LED_PIN LED_BUILTIN
-  #define BUTTON_PIN 7
-#elif defined(BOARD_SEEED_XIAO_ESP32C3)
+#if defined(BOARD_SEEED_XIAO_ESP32C3)
   #define I2S_WS  3    // LRCLK
   #define I2S_SD  20   // DOUT
   #define I2S_SCK 8    // BCLK
