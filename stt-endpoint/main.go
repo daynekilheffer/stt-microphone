@@ -80,8 +80,13 @@ func main() {
 			return
 		}
 		slog.Info("recognized speech", "duration", time.Since(start), "results", len(resp.Results))
+
+		transcript := "..."
+		if len(resp.Results) > 0 && len(resp.Results[0].Alternatives) > 0 {
+			transcript = resp.Results[0].Alternatives[0].Transcript
+		}
 		data, err := json.Marshal(map[string]any{
-			"text": resp.Results[0].Alternatives[0].Transcript,
+			"text": transcript,
 		})
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -202,8 +207,12 @@ func main() {
 		slog.Info("streaming recognition completed", "duration", time.Since(start), "results", finalResults)
 
 		// Send all results as single JSON response
+		transcript := "..."
+		if finalResults != nil && len(finalResults.Alternatives) > 0 {
+			transcript = finalResults.Alternatives[0].Transcript
+		}
 		data, err := json.Marshal(map[string]any{
-			"text": finalResults.Alternatives[0].Transcript,
+			"text": transcript,
 		})
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
