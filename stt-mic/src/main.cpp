@@ -45,7 +45,7 @@ uint8_t audioBuffer[MAX_BYTES + 44];
 uint32_t lastActivityTime = 0;
 
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(SERIAL_BAUD);
 
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   pinMode(LED_PIN, OUTPUT);
