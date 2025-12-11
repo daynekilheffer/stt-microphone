@@ -17,15 +17,11 @@ const char* STT_ENDPOINT_PATH = "/stream";
 #define SLEEP_TIMEOUT_MS 10000  // 10 seconds of inactivity
 
 // I2S mic pins
-#if defined(BOARD_SEEED_XIAO_ESP32C3)
-  #define I2S_WS  3    // LRCLK
-  #define I2S_SD  20   // DOUT
-  #define I2S_SCK 8    // BCLK
-  #define LED_PIN D10
-  #define BUTTON_PIN 5
-#else
-  #error "Please define board type"
-#endif
+#define I2S_WS  3    // LRCLK
+#define I2S_SD  20   // DOUT
+#define I2S_SCK 8    // BCLK
+#define LED_PIN D10
+#define BUTTON_PIN 5
 
 // Audio settings
 #define SAMPLE_RATE    8000   // Reduced from 16000 for longer recording
