@@ -33,6 +33,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Get recognizer name from environment or use default
+	recognizerName := os.Getenv("RECOGNIZER_NAME")
+	if recognizerName == "" {
+		recognizerName = "projects/daynek-stt-microphone-480916/locations/global/recognizers/_"
+	}
+	slog.Info("using recognizer", "name", recognizerName)
+
 	ctx := context.Background()
 	mux := http.NewServeMux()
 
@@ -66,7 +73,7 @@ func main() {
 
 		start := time.Now()
 		req := &speechpb.RecognizeRequest{
-			Recognizer: "projects/dayne-ad32/locations/global/recognizers/_",
+			Recognizer: recognizerName,
 			Config: &speechpb.RecognitionConfig{
 				DecodingConfig: &speechpb.RecognitionConfig_AutoDecodingConfig{},
 				LanguageCodes:  []string{"en-US"},
@@ -112,7 +119,7 @@ func main() {
 
 		// Send initial config
 		if err := stream.Send(&speechpb.StreamingRecognizeRequest{
-			Recognizer: "projects/dayne-ad32/locations/global/recognizers/_",
+			Recognizer: recognizerName,
 			StreamingRequest: &speechpb.StreamingRecognizeRequest_StreamingConfig{
 				StreamingConfig: &speechpb.StreamingRecognitionConfig{
 					Config: &speechpb.RecognitionConfig{
