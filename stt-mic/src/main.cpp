@@ -209,8 +209,11 @@ void recordAndStreamUpload() {
   Serial.println("Streaming audio...");
   digitalWrite(LED_PIN, HIGH);
 
-  // Temporarily deinit BLE to free memory for SSL
-  if (bleConnected) {
+  // Determine if we need HTTPS or HTTP
+  bool useHttps = (strcmp(STT_ENDPOINT_PROTOCOL, "https") == 0);
+  
+  // Temporarily deinit BLE to free memory for SSL (only if using HTTPS)
+  if (useHttps && bleConnected) {
     Serial.println("Disconnecting BLE to free memory for SSL...");
     if (pClient != nullptr) {
       pClient->disconnect();
@@ -219,36 +222,46 @@ void recordAndStreamUpload() {
     delay(100);
   }
 
-  // Connect to server with HTTPS
-  WiFiClientSecure client;
-  client.setInsecure();  // Skip certificate verification (use for development)
-  // For production, use: client.setCACert(root_ca);
+  // Create appropriate client based on protocol
+  WiFiClient* client;
+  WiFiClient httpClient;
+  WiFiClientSecure httpsClient;
   
-  if (!client.connect(STT_ENDPOINT_HOST, STT_ENDPOINT_PORT)) {
+  if (useHttps) {
+    Serial.println("Using HTTPS...");
+    httpsClient.setInsecure();  // Skip certificate verification (use for development)
+    // For production, use: httpsClient.setCACert(root_ca);
+    client = &httpsClient;
+  } else {
+    Serial.println("Using HTTP...");
+    client = &httpClient;
+  }
+  
+  if (!client->connect(STT_ENDPOINT_HOST, STT_ENDPOINT_PORT)) {
     Serial.println("Connection failed");
     digitalWrite(LED_PIN, LOW);
     return;
   }
 
   // Send HTTP headers manually
-  client.print("POST ");
-  client.print(STT_ENDPOINT_PATH);
-  client.println(" HTTP/1.1");
-  client.print("Host: ");
-  client.print(STT_ENDPOINT_HOST);
-  client.print(":");
-  client.println(STT_ENDPOINT_PORT);
-  client.println("Content-Type: audio/l16");
-  client.print("X-Dayne-Sample-Rate: ");
-  client.println(SAMPLE_RATE);
-  client.print("X-Dayne-Channels: ");
-  client.println(CHANNELS);
-  client.print("X-Dayne-Bits-Per-Sample: ");
-  client.println(BITS_PER_SAMPLE);
-  client.println("Transfer-Encoding: chunked");
-  client.println("Connection: close");
-  client.println();  // End of headers
-  client.flush();  // Ensure headers are sent before starting audio
+  client->print("POST ");
+  client->print(STT_ENDPOINT_PATH);
+  client->println(" HTTP/1.1");
+  client->print("Host: ");
+  client->print(STT_ENDPOINT_HOST);
+  client->print(":");
+  client->println(STT_ENDPOINT_PORT);
+  client->println("Content-Type: audio/l16");
+  client->print("X-Dayne-Sample-Rate: ");
+  client->println(SAMPLE_RATE);
+  client->print("X-Dayne-Channels: ");
+  client->println(CHANNELS);
+  client->print("X-Dayne-Bits-Per-Sample: ");
+  client->println(BITS_PER_SAMPLE);
+  client->println("Transfer-Encoding: chunked");
+  client->println("Connection: close");
+  client->println();  // End of headers
+  client->flush();  // Ensure headers are sent before starting audio
 
   // Give server time to process headers
   delay(20);
@@ -270,9 +283,9 @@ void recordAndStreamUpload() {
       char chunkSize[16];
       sprintf(chunkSize, "%X\r\n", bytesRead);
       
-      size_t headerWritten = client.print(chunkSize);
-      size_t dataWritten = client.write(chunk, bytesRead);
-      size_t trailerWritten = client.print("\r\n");
+      size_t headerWritten = client->print(chunkSize);
+      size_t dataWritten = client->write(chunk, bytesRead);
+      size_t trailerWritten = client->print("\r\n");
       
       // Check if write succeeded
       if (headerWritten == 0 || dataWritten != bytesRead || trailerWritten == 0) {
@@ -288,7 +301,7 @@ void recordAndStreamUpload() {
       
       // Flush after every few chunks to ensure data is sent
       if (totalChunks % 10 == 0) {
-        client.flush();
+        client->flush();
       }
     }
     
@@ -299,7 +312,7 @@ void recordAndStreamUpload() {
     }
     
     // Check connection
-    if (!client.connected()) {
+    if (!client->connected()) {
       Serial.print("Connection lost at ");
       Serial.print(totalBytes);
       Serial.println(" bytes");
@@ -310,8 +323,8 @@ void recordAndStreamUpload() {
   }
   
   // Send final chunk (size 0) to signal end
-  client.print("0\r\n\r\n");
-  client.flush();  // Ensure final chunk is sent
+  client->print("0\r\n\r\n");
+  client->flush();  // Ensure final chunk is sent
   
   uint32_t duration = millis() - startTime;
   digitalWrite(LED_PIN, LOW);
@@ -325,39 +338,41 @@ void recordAndStreamUpload() {
   // Read response
   Serial.println("Reading response...");
   unsigned long timeout = millis();
-  while (client.available() == 0) {
+  while (client->available() == 0) {
     if (millis() - timeout > 5000) {
       Serial.println("Response timeout");
-      client.stop();
+      client->stop();
       return;
     }
     delay(10);
   }
 
   // Read status line
-  String statusLine = client.readStringUntil('\n');
+  String statusLine = client->readStringUntil('\n');
   Serial.print("HTTP Status: ");
   Serial.println(statusLine);
 
   // Skip headers
-  while (client.available()) {
-    String line = client.readStringUntil('\n');
+  while (client->available()) {
+    String line = client->readStringUntil('\n');
     if (line == "\r") break;  // End of headers
   }
 
   // Read response body
   String response = "";
-  while (client.available()) {
-    response += client.readString();
+  while (client->available()) {
+    response += client->readString();
   }
   
-  client.stop();
+  client->stop();;
   Serial.println("Response: " + response);
   
-  // Re-initialize BLE after SSL is done
-  Serial.println("Re-initializing BLE...");
-  BLEDevice::init("");
-  delay(100);
+  // Re-initialize BLE after SSL is done (only if we deinit'd it)
+  if (useHttps) {
+    Serial.println("Re-initializing BLE...");
+    BLEDevice::init("");
+    delay(100);
+  }
   
   // Parse JSON
   JsonDocument doc;
