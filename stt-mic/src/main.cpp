@@ -7,6 +7,7 @@
 #include <BLEDevice.h>
 #include <BLEClient.h>
 #include <BLEUtils.h>
+#include "AudioTools.h"
 
 #include "../include/secrets.h"
 
@@ -26,12 +27,20 @@
 
 // Audio settings
 #define SAMPLE_RATE    8000   // 8kHz sample rate
-#define MAX_SECONDS    5      // Max 5 seconds (streaming, so buffer is just a safety limit)
-#define MAX_SAMPLES    (SAMPLE_RATE * MAX_SECONDS)
-#define MAX_BYTES      (MAX_SAMPLES * sizeof(int16_t))
+#define CHANNELS       1      // Mono
+#define BITS_PER_SAMPLE 16    // 16-bit samples
 
-// Add 44 bytes for WAV header
-uint8_t audioBuffer[MAX_BYTES + 44];
+// Buffer settings
+#define CHUNK_SIZE 512
+#define MAX_RECORDING_SIZE (8000 * 2 * 3)  // 3 seconds max at 8kHz 16-bit (48KB)
+
+// Audio-tools objects
+I2SStream i2sStream;
+NumberFormatConverterStream converter(i2sStream);
+FilteredStream<int32_t, int16_t> filtered(converter, CHUNK_SIZE / 4);
+
+// Recording buffer (raw LINEAR16 audio) - allocate dynamically to avoid stack overflow
+uint8_t* recordingBuffer = nullptr;
 
 uint32_t lastActivityTime = 0;
 
@@ -147,29 +156,33 @@ void setup() {
   }
   Serial.println("\nWiFi connected.");
 
-  // I2S config
-  i2s_config_t i2s_config = {
-    .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
-    .sample_rate = SAMPLE_RATE,
-    .bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT,
-    .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
-    .communication_format = I2S_COMM_FORMAT_STAND_I2S,
-    .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-    .dma_buf_count = 8,
-    .dma_buf_len = 256,
-    .use_apll = false
-  };
+  // Configure I2S stream with audio-tools
+  auto i2s_config = i2sStream.defaultConfig(RX_MODE);
+  i2s_config.sample_rate = SAMPLE_RATE;
+  i2s_config.bits_per_sample = 32;  // Most MEMS mics output 32-bit
+  i2s_config.channels = CHANNELS;
+  i2s_config.i2s_format = I2S_STD_FORMAT;
+  i2s_config.pin_bck = I2S_SCK;
+  i2s_config.pin_ws = I2S_WS;
+  i2s_config.pin_data = I2S_SD;
+  i2s_config.use_apll = false;
+  i2s_config.auto_clear = true;
+  
+  i2sStream.begin(i2s_config);
+  
+  // Setup converter: 32-bit input to 16-bit output
+  converter.begin(32, 16);  // from_bits, to_bits
+  filtered.begin();
 
-  i2s_pin_config_t pin_config = {
-    .bck_io_num = I2S_SCK,
-    .ws_io_num = I2S_WS,
-    .data_out_num = -1,
-    .data_in_num = I2S_SD
-  };
-
-  i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
-  i2s_set_pin(I2S_NUM_0, &pin_config);
-  i2s_zero_dma_buffer(I2S_NUM_0);
+  // Allocate recording buffer BEFORE BLE to ensure we have memory
+  recordingBuffer = (uint8_t*)malloc(MAX_RECORDING_SIZE);
+  if (recordingBuffer == nullptr) {
+    Serial.println("Failed to allocate recording buffer!");
+    ESP.restart();
+  }
+  Serial.print("Allocated recording buffer: ");
+  Serial.print(MAX_RECORDING_SIZE);
+  Serial.println(" bytes");
 
   // Initialize BLE
   Serial.println("Initializing BLE client...");
@@ -195,44 +208,6 @@ void setup() {
   lastActivityTime = millis();
 }
 
-// ------------------- WAV HEADER --------------------
-void addWavHeader(uint8_t* buffer, uint32_t dataSize) {
-  memcpy(buffer, "RIFF", 4);
-  uint32_t chunkSize = dataSize + 36;
-  memcpy(buffer + 4, &chunkSize, 4);
-  memcpy(buffer + 8, "WAVEfmt ", 8);
-
-  uint32_t subchunk1Size = 16;
-  uint16_t audioFormat = 1;
-  uint16_t numChannels = 1;
-  uint32_t sampleRate = SAMPLE_RATE;
-  uint32_t byteRate = SAMPLE_RATE * 2;
-  uint16_t blockAlign = 2;
-  uint16_t bitsPerSample = 16;
-
-  memcpy(buffer + 16, &subchunk1Size, 4);
-  memcpy(buffer + 20, &audioFormat, 2);
-  memcpy(buffer + 22, &numChannels, 2);
-  memcpy(buffer + 24, &sampleRate, 4);
-  memcpy(buffer + 28, &byteRate, 4);
-  memcpy(buffer + 32, &blockAlign, 2);
-  memcpy(buffer + 34, &bitsPerSample, 2);
-
-  memcpy(buffer + 36, "data", 4);
-  memcpy(buffer + 40, &dataSize, 4);
-}
-
-// -------------------- RMS CALCULATION -------------------
-float calculateRMS(const int16_t* samples, size_t numSamples) {
-  if (numSamples == 0) return 0.0f;
-  
-  double sumSquares = 0;
-  for (size_t i = 0; i < numSamples; ++i) {
-    sumSquares += samples[i] * samples[i];
-  }
-  return sqrt(sumSquares / numSamples);
-}
-
 // -------------------- STREAMING RECORD & UPLOAD -----------------------
 void recordAndStreamUpload() {
   if (WiFi.status() != WL_CONNECTED) {
@@ -240,8 +215,7 @@ void recordAndStreamUpload() {
     return;
   }
 
-  uint32_t startTime = millis();
-  Serial.println("Recording & streaming...");
+  Serial.println("Streaming audio...");
   digitalWrite(LED_PIN, HIGH);
 
   // Connect to server
@@ -251,98 +225,73 @@ void recordAndStreamUpload() {
     digitalWrite(LED_PIN, LOW);
     return;
   }
-  Serial.println("Connected to server.");
 
-  size_t totalBytes = 0;
-  size_t bytesRead = 0;
-  int32_t i2sBuffer[128];
-  int16_t audioChunk[128];
-  uint32_t recordStart = millis();
-  size_t sampleCount = 0;
-
-  // Send HTTP headers with chunked encoding
+  // Send HTTP headers manually
   client.print("POST ");
   client.print(STT_ENDPOINT_PATH);
   client.println(" HTTP/1.1");
   client.print("Host: ");
-  client.println(STT_ENDPOINT_HOST);
-  client.println("Content-Type: audio/wav");
+  client.print(STT_ENDPOINT_HOST);
+  client.print(":");
+  client.println(STT_ENDPOINT_PORT);
+  client.println("Content-Type: audio/l16");
+  client.print("X-Dayne-Sample-Rate: ");
+  client.println(SAMPLE_RATE);
+  client.print("X-Dayne-Channels: ");
+  client.println(CHANNELS);
+  client.print("X-Dayne-Bits-Per-Sample: ");
+  client.println(BITS_PER_SAMPLE);
   client.println("Transfer-Encoding: chunked");
   client.println("Connection: close");
-  client.println();
+  client.println();  // End of headers
 
-  // Prepare WAV header (we'll update size later, but send placeholder)
-  uint8_t wavHeader[44];
-  addWavHeader(wavHeader, 0);  // Placeholder size
+  // Stream audio while button is pressed
+  uint32_t startTime = millis();
+  size_t totalBytes = 0;
+  uint8_t chunk[CHUNK_SIZE];
   
-  // Send WAV header as first chunk
-  client.printf("%X\r\n", 44);
-  client.write(wavHeader, 44);
-  client.print("\r\n");
-
-  // Record and stream audio data as chunks
-  bool recording = true;
-  while (recording) {
-    // Stop if max time reached
-    if (millis() - recordStart > (MAX_SECONDS * 1000UL)) {
-      Serial.println("Max recording time reached.");
-      break;
-    }
-
-    // Stop if buffer would overflow
-    if (sampleCount >= MAX_SAMPLES) {
-      Serial.println("Max samples reached.");
-      break;
-    }
-
-    // Read 32-bit I2S samples
-    i2s_read(I2S_NUM_0, i2sBuffer, sizeof(i2sBuffer), &bytesRead, portMAX_DELAY);
+  while (digitalRead(BUTTON_PIN) == LOW) {
+    // Read from filtered stream (already converted to 16-bit)
+    size_t bytesRead = filtered.readBytes(chunk, CHUNK_SIZE);
     
-    // Convert 32-bit samples to 16-bit by shifting down
-    size_t samplesRead = bytesRead / sizeof(int32_t);
-    size_t samplesToWrite = 0;
-    
-    for (size_t i = 0; i < samplesRead && sampleCount < MAX_SAMPLES; i++) {
-      audioChunk[samplesToWrite++] = (int16_t)(i2sBuffer[i] >> 14);
-      sampleCount++;
-    }
-    
-    // Send the chunk if we have data
-    if (samplesToWrite > 0) {
-      size_t chunkBytes = samplesToWrite * sizeof(int16_t);
-      
-      // Write chunk size in hex
-      client.printf("%X\r\n", chunkBytes);
-      // Write chunk data
-      client.write((uint8_t*)audioChunk, chunkBytes);
+    if (bytesRead > 0) {
+      // Send as HTTP chunk: size in hex + CRLF + data + CRLF
+      char chunkSize[16];
+      sprintf(chunkSize, "%X\r\n", bytesRead);
+      client.print(chunkSize);
+      client.write(chunk, bytesRead);
       client.print("\r\n");
       
-      totalBytes += chunkBytes;
+      totalBytes += bytesRead;
     }
     
-    // Check button state AFTER processing the data
-    if (digitalRead(BUTTON_PIN) != LOW) {
-      recording = false;
+    // Safety timeout (max 10 seconds)
+    if (millis() - startTime > 10000) {
+      Serial.println("Max streaming time reached");
+      break;
     }
+    
+    // Check connection
+    if (!client.connected()) {
+      Serial.println("Connection lost");
+      break;
+    }
+    
+    yield();
   }
-
-  uint32_t recordStop = millis();
-  uint32_t recordDuration = recordStop - recordStart;
-
-  // Send final zero-length chunk to signal end
-  client.println("0");
-  client.println();
-
+  
+  // Send final chunk (size 0) to signal end
+  client.print("0\r\n\r\n");
+  
+  uint32_t duration = millis() - startTime;
   digitalWrite(LED_PIN, LOW);
-
-  Serial.print("Recording stopped. Bytes streamed: ");
+  Serial.print("Streaming stopped. Duration: ");
+  Serial.print(duration);
+  Serial.print(" ms, Bytes: ");
   Serial.println(totalBytes);
-  Serial.print("Record duration: ");
-  Serial.print(recordDuration);
-  Serial.println(" ms");
 
-  // Wait for response
-  uint32_t responseStart = millis();
+  // Read response
+  Serial.println("Reading response...");
   unsigned long timeout = millis();
   while (client.available() == 0) {
     if (millis() - timeout > 5000) {
@@ -350,64 +299,44 @@ void recordAndStreamUpload() {
       client.stop();
       return;
     }
+    delay(10);
   }
 
-  // Read HTTP headers until we find the JSON body
-  String jsonResponse = "";
-  bool headersComplete = false;
-  bool foundJson = false;
-  
+  // Read status line
+  String statusLine = client.readStringUntil('\n');
+  Serial.print("HTTP Status: ");
+  Serial.println(statusLine);
+
+  // Skip headers
   while (client.available()) {
     String line = client.readStringUntil('\n');
-    line.trim();
-    
-    if (!headersComplete) {
-      // Empty line signals end of headers
-      if (line.length() == 0) {
-        headersComplete = true;
-      }
-    } else {
-      // We're in the body now
-      if (line.startsWith("{") && line.indexOf("\"text\"") > 0) {
-        jsonResponse = line;
-        foundJson = true;
-        break;
-      }
-    }
+    if (line == "\r") break;  // End of headers
   }
 
-  uint32_t responseTime = millis() - responseStart;
-  uint32_t totalTime = millis() - startTime;
-  
-  // Parse and display the transcription using ArduinoJson
-  if (foundJson) {
-    JsonDocument doc;
-    DeserializationError error = deserializeJson(doc, jsonResponse);
-    
-    if (error) {
-      Serial.print("JSON parse error: ");
-      Serial.println(error.c_str());
-    } else if (!doc["text"].isNull()) {
-      const char* transcription = doc["text"];
-      Serial.println("\n=== Transcription ===");
-      Serial.println(transcription);
-      Serial.println("=====================\n");
-      
-      // Send transcription via BLE
-      sendTextViaBLE(transcription);
-    }
-  } else {
-    Serial.println("No transcription received");
+  // Read response body
+  String response = "";
+  while (client.available()) {
+    response += client.readString();
   }
   
-  Serial.print("Response time: ");
-  Serial.print(responseTime);
-  Serial.println(" ms");
-  Serial.print("Total time: ");
-  Serial.print(totalTime);
-  Serial.println(" ms");
-
   client.stop();
+  Serial.println("Response: " + response);
+  
+  // Parse JSON
+  JsonDocument doc;
+  DeserializationError error = deserializeJson(doc, response);
+  
+  if (error) {
+    Serial.print("JSON parse error: ");
+    Serial.println(error.c_str());
+  } else if (!doc["text"].isNull()) {
+    const char* transcription = doc["text"];
+    Serial.println("\n=== Transcription ===");
+    Serial.println(transcription);
+    Serial.println("=====================\n");
+    
+    sendTextViaBLE(transcription);
+  }
 }
 
 // ------------------------- LOOP --------------------------

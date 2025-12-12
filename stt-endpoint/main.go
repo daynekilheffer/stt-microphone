@@ -59,9 +59,20 @@ func main() {
 			return
 		}
 
+		// Read audio parameters from custom headers
+		sampleRateStr := r.Header.Get("X-Dayne-Sample-Rate")
+		if sampleRateStr == "" {
+			sampleRateStr = "8000" // default
+		}
+		var sampleRate int32 = 8000
+		if _, err := fmt.Sscanf(sampleRateStr, "%d", &sampleRate); err != nil {
+			slog.Warn("failed to parse sample rate, using default", "error", err, "value", sampleRateStr)
+		}
+		slog.Info("received audio", "sample_rate", sampleRate, "size", len(body))
+
 		// Save audio file with unique timestamp-based filename
 		timestamp := time.Now().Format("20060102-150405.000")
-		filename := fmt.Sprintf("audio-%s.wav", timestamp)
+		filename := fmt.Sprintf("audio-%s.raw", timestamp)
 		filepath := filepath.Join(outputDir, filename)
 
 		if err := os.WriteFile(filepath, body, 0644); err != nil {
@@ -75,9 +86,15 @@ func main() {
 		req := &speechpb.RecognizeRequest{
 			Recognizer: recognizerName,
 			Config: &speechpb.RecognitionConfig{
-				DecodingConfig: &speechpb.RecognitionConfig_AutoDecodingConfig{},
-				LanguageCodes:  []string{"en-US"},
-				Model:          "short",
+				DecodingConfig: &speechpb.RecognitionConfig_ExplicitDecodingConfig{
+					ExplicitDecodingConfig: &speechpb.ExplicitDecodingConfig{
+						Encoding:          speechpb.ExplicitDecodingConfig_LINEAR16,
+						SampleRateHertz:   sampleRate,
+						AudioChannelCount: 1,
+					},
+				},
+				LanguageCodes: []string{"en-US"},
+				Model:         "short",
 			},
 			AudioSource: &speechpb.RecognizeRequest_Content{
 				Content: body,
@@ -109,6 +126,17 @@ func main() {
 
 	// Streaming endpoint
 	mux.HandleFunc("/stream", func(w http.ResponseWriter, r *http.Request) {
+		// Read audio parameters from custom headers
+		sampleRateStr := r.Header.Get("X-Dayne-Sample-Rate")
+		if sampleRateStr == "" {
+			sampleRateStr = "8000" // default
+		}
+		var sampleRate int32 = 8000
+		if _, err := fmt.Sscanf(sampleRateStr, "%d", &sampleRate); err != nil {
+			slog.Warn("failed to parse sample rate, using default", "error", err, "value", sampleRateStr)
+		}
+		slog.Info("starting stream", "sample_rate", sampleRate)
+
 		start := time.Now()
 		stream, err := client.StreamingRecognize(r.Context())
 		if err != nil {
@@ -117,15 +145,21 @@ func main() {
 			return
 		}
 
-		// Send initial config
+		// Send initial config for LINEAR16
 		if err := stream.Send(&speechpb.StreamingRecognizeRequest{
 			Recognizer: recognizerName,
 			StreamingRequest: &speechpb.StreamingRecognizeRequest_StreamingConfig{
 				StreamingConfig: &speechpb.StreamingRecognitionConfig{
 					Config: &speechpb.RecognitionConfig{
-						DecodingConfig: &speechpb.RecognitionConfig_AutoDecodingConfig{},
-						LanguageCodes:  []string{"en-US"},
-						Model:          "short",
+						DecodingConfig: &speechpb.RecognitionConfig_ExplicitDecodingConfig{
+							ExplicitDecodingConfig: &speechpb.ExplicitDecodingConfig{
+								Encoding:          speechpb.ExplicitDecodingConfig_LINEAR16,
+								SampleRateHertz:   sampleRate,
+								AudioChannelCount: 1,
+							},
+						},
+						LanguageCodes: []string{"en-US"},
+						Model:         "short",
 					},
 				},
 			},
@@ -138,7 +172,7 @@ func main() {
 		// Stream audio chunks from request body directly to STT
 		// Also save to file
 		timestamp := time.Now().Format("20060102-150405.000")
-		filename := fmt.Sprintf("audio-%s.wav", timestamp)
+		filename := fmt.Sprintf("audio-%s.raw", timestamp)
 		filepath := filepath.Join(outputDir, filename)
 		file, err := os.Create(filepath)
 		if err != nil {
