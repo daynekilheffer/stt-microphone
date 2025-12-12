@@ -10,19 +10,12 @@
 
 #include "../include/secrets.h"
 
-// ---------------------- CONFIG ----------------------
-
-const char* STT_ENDPOINT_PROTOCOL = "http";
-const char* STT_ENDPOINT_HOST = "10.0.0.17";
-const int   STT_ENDPOINT_PORT = 7878;
-const char* STT_ENDPOINT_PATH = "/stream";
-
 // BLE configuration
 #define BLE_SERVER_NAME "ESP32 Keyboard Server"
 #define SERVICE_UUID "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
 #define CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
 
-#define SLEEP_TIMEOUT_MS 10000  // 10 seconds of inactivity
+#define SLEEP_TIMEOUT_MS 30000  // 30 seconds of inactivity
 
 // I2S mic pins
 #define I2S_WS  3    // LRCLK
@@ -33,7 +26,7 @@ const char* STT_ENDPOINT_PATH = "/stream";
 
 // Audio settings
 #define SAMPLE_RATE    8000   // 8kHz sample rate
-#define MAX_SECONDS    3      // Max 3 seconds (streaming, so buffer is just a safety limit)
+#define MAX_SECONDS    5      // Max 5 seconds (streaming, so buffer is just a safety limit)
 #define MAX_SAMPLES    (SAMPLE_RATE * MAX_SECONDS)
 #define MAX_BYTES      (MAX_SAMPLES * sizeof(int16_t))
 
