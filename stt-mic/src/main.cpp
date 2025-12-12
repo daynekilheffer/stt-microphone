@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include "driver/i2s.h"
@@ -26,21 +27,17 @@
 #define BUTTON_PIN 5
 
 // Audio settings
-#define SAMPLE_RATE    8000   // 8kHz sample rate
+#define SAMPLE_RATE    16000  // 16kHz sample rate for better quality
 #define CHANNELS       1      // Mono
 #define BITS_PER_SAMPLE 16    // 16-bit samples
 
 // Buffer settings
-#define CHUNK_SIZE 512
-#define MAX_RECORDING_SIZE (8000 * 2 * 3)  // 3 seconds max at 8kHz 16-bit (48KB)
+#define CHUNK_SIZE 256  // Reduced from 512 to save memory
 
 // Audio-tools objects
 I2SStream i2sStream;
 NumberFormatConverterStream converter(i2sStream);
 FilteredStream<int32_t, int16_t> filtered(converter, CHUNK_SIZE / 4);
-
-// Recording buffer (raw LINEAR16 audio) - allocate dynamically to avoid stack overflow
-uint8_t* recordingBuffer = nullptr;
 
 uint32_t lastActivityTime = 0;
 
@@ -174,17 +171,7 @@ void setup() {
   converter.begin(32, 16);  // from_bits, to_bits
   filtered.begin();
 
-  // Allocate recording buffer BEFORE BLE to ensure we have memory
-  recordingBuffer = (uint8_t*)malloc(MAX_RECORDING_SIZE);
-  if (recordingBuffer == nullptr) {
-    Serial.println("Failed to allocate recording buffer!");
-    ESP.restart();
-  }
-  Serial.print("Allocated recording buffer: ");
-  Serial.print(MAX_RECORDING_SIZE);
-  Serial.println(" bytes");
-
-  // Initialize BLE
+  // Initialize BLE, scan for device, then deinitialize to save memory
   Serial.println("Initializing BLE client...");
   BLEDevice::init("");
   BLEScan* pBLEScan = BLEDevice::getScan();
@@ -197,11 +184,15 @@ void setup() {
   pBLEScan->start(5, false);
   
   if (bleServerDevice != nullptr) {
-    connectToBLEServer();
+    Serial.println("BLE keyboard server found");
   } else {
     Serial.println("BLE keyboard server not found");
   }
-
+  
+  // Deinitialize BLE to free memory - we'll reinit when needed
+  Serial.println("Deinitializing BLE to save memory...");
+  BLEDevice::deinit(false);
+  
   Serial.println("Setup complete.");
   
   // Initialize last activity time
@@ -218,8 +209,21 @@ void recordAndStreamUpload() {
   Serial.println("Streaming audio...");
   digitalWrite(LED_PIN, HIGH);
 
-  // Connect to server
-  WiFiClient client;
+  // Temporarily deinit BLE to free memory for SSL
+  if (bleConnected) {
+    Serial.println("Disconnecting BLE to free memory for SSL...");
+    if (pClient != nullptr) {
+      pClient->disconnect();
+    }
+    BLEDevice::deinit(false);
+    delay(100);
+  }
+
+  // Connect to server with HTTPS
+  WiFiClientSecure client;
+  client.setInsecure();  // Skip certificate verification (use for development)
+  // For production, use: client.setCACert(root_ca);
+  
   if (!client.connect(STT_ENDPOINT_HOST, STT_ENDPOINT_PORT)) {
     Serial.println("Connection failed");
     digitalWrite(LED_PIN, LOW);
@@ -244,10 +248,17 @@ void recordAndStreamUpload() {
   client.println("Transfer-Encoding: chunked");
   client.println("Connection: close");
   client.println();  // End of headers
+  client.flush();  // Ensure headers are sent before starting audio
+
+  // Give server time to process headers
+  delay(20);
+  
+  Serial.println("Starting audio streaming...");
 
   // Stream audio while button is pressed
   uint32_t startTime = millis();
   size_t totalBytes = 0;
+  size_t totalChunks = 0;
   uint8_t chunk[CHUNK_SIZE];
   
   while (digitalRead(BUTTON_PIN) == LOW) {
@@ -258,11 +269,27 @@ void recordAndStreamUpload() {
       // Send as HTTP chunk: size in hex + CRLF + data + CRLF
       char chunkSize[16];
       sprintf(chunkSize, "%X\r\n", bytesRead);
-      client.print(chunkSize);
-      client.write(chunk, bytesRead);
-      client.print("\r\n");
+      
+      size_t headerWritten = client.print(chunkSize);
+      size_t dataWritten = client.write(chunk, bytesRead);
+      size_t trailerWritten = client.print("\r\n");
+      
+      // Check if write succeeded
+      if (headerWritten == 0 || dataWritten != bytesRead || trailerWritten == 0) {
+        Serial.println("Write failed!");
+        Serial.print("Header: "); Serial.print(headerWritten);
+        Serial.print(", Data: "); Serial.print(dataWritten);
+        Serial.print(", Trailer: "); Serial.println(trailerWritten);
+        break;
+      }
       
       totalBytes += bytesRead;
+      totalChunks++;
+      
+      // Flush after every few chunks to ensure data is sent
+      if (totalChunks % 10 == 0) {
+        client.flush();
+      }
     }
     
     // Safety timeout (max 10 seconds)
@@ -273,7 +300,9 @@ void recordAndStreamUpload() {
     
     // Check connection
     if (!client.connected()) {
-      Serial.println("Connection lost");
+      Serial.print("Connection lost at ");
+      Serial.print(totalBytes);
+      Serial.println(" bytes");
       break;
     }
     
@@ -282,13 +311,16 @@ void recordAndStreamUpload() {
   
   // Send final chunk (size 0) to signal end
   client.print("0\r\n\r\n");
+  client.flush();  // Ensure final chunk is sent
   
   uint32_t duration = millis() - startTime;
   digitalWrite(LED_PIN, LOW);
   Serial.print("Streaming stopped. Duration: ");
   Serial.print(duration);
   Serial.print(" ms, Bytes: ");
-  Serial.println(totalBytes);
+  Serial.print(totalBytes);
+  Serial.print(", Chunks: ");
+  Serial.println(totalChunks);
 
   // Read response
   Serial.println("Reading response...");
@@ -322,6 +354,11 @@ void recordAndStreamUpload() {
   client.stop();
   Serial.println("Response: " + response);
   
+  // Re-initialize BLE after SSL is done
+  Serial.println("Re-initializing BLE...");
+  BLEDevice::init("");
+  delay(100);
+  
   // Parse JSON
   JsonDocument doc;
   DeserializationError error = deserializeJson(doc, response);
@@ -334,6 +371,12 @@ void recordAndStreamUpload() {
     Serial.println("\n=== Transcription ===");
     Serial.println(transcription);
     Serial.println("=====================\n");
+    
+    // Reconnect to BLE server if needed
+    if (!bleConnected && bleServerDevice != nullptr) {
+      Serial.println("Reconnecting to BLE server...");
+      connectToBLEServer();
+    }
     
     sendTextViaBLE(transcription);
   }
