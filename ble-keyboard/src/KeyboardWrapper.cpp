@@ -8,10 +8,15 @@ KeyboardWrapper::KeyboardWrapper() {
 }
 
 void KeyboardWrapper::begin() {
+  // Set USB device descriptors before begin()
+  TinyUSBDevice.setProductDescriptor("STT Microphone");
+  TinyUSBDevice.setManufacturerDescriptor("Dayne");
+  
   // Manual begin() is required on core without built-in support
   if (!TinyUSBDevice.isInitialized()) {
     TinyUSBDevice.begin(0);
   }
+  delay(100);
 
   // Setup HID
   usb_hid.setBootProtocol(HID_ITF_PROTOCOL_KEYBOARD);
@@ -34,40 +39,38 @@ bool KeyboardWrapper::isReady() {
 }
 
 void KeyboardWrapper::sendKey(uint8_t keycode, uint8_t modifier) {
-  if (!isReady()) return;
-  
+  while (!usb_hid.ready()) {
+    if (!TinyUSBDevice.mounted()) return;
+    delay(1);
+  }
+
   if (TinyUSBDevice.suspended()) {
     TinyUSBDevice.remoteWakeup();
   }
 
   uint8_t keycodes[6] = {keycode, 0, 0, 0, 0, 0};
   usb_hid.keyboardReport(0, modifier, keycodes);
-  delay(2);
+  delay(5);
+  while (!usb_hid.ready()) {
+    if (!TinyUSBDevice.mounted()) return;
+    delay(1);
+  }
   usb_hid.keyboardRelease(0);
+  delay(5);
 }
 
 void KeyboardWrapper::print(const char* str) {
   for (size_t i = 0; str[i] != '\0'; i++) {
-    char c = str[i];
-    uint8_t keycode = 0;
-    uint8_t modifier = 0;
-
-    // Convert character to HID keycode
-    if (c >= 'a' && c <= 'z') {
-      keycode = HID_KEY_A + (c - 'a');
-    } else if (c >= 'A' && c <= 'Z') {
-      keycode = HID_KEY_A + (c - 'A');
-      modifier = KEYBOARD_MODIFIER_LEFTSHIFT;
-    } else if (c >= '1' && c <= '9') {
-      keycode = HID_KEY_1 + (c - '1');
-    } else if (c == '0') {
-      keycode = HID_KEY_0;
-    } else if (c == ' ') {
-      keycode = HID_KEY_SPACE;
-    } else if (c == '\n') {
-      keycode = HID_KEY_ENTER;
-    }
-
+    uint8_t c = (uint8_t)str[i];
+    
+    // Skip characters outside the lookup table range
+    if (c > 127) continue;
+    
+    uint8_t const conv_table[128][2] =  { HID_ASCII_TO_KEYCODE };
+    uint8_t modifier   = 0;
+    uint8_t keycode = conv_table[c][1];
+    if ( conv_table[c][0] ) modifier = KEYBOARD_MODIFIER_LEFTSHIFT;
+    
     if (keycode != 0) {
       sendKey(keycode, modifier);
     }
