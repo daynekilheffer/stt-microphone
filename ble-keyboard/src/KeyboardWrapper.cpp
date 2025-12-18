@@ -50,13 +50,14 @@ void KeyboardWrapper::sendKey(uint8_t keycode, uint8_t modifier) {
 
   uint8_t keycodes[6] = {keycode, 0, 0, 0, 0, 0};
   usb_hid.keyboardReport(0, modifier, keycodes);
-  delay(5);
+  delay(20);
   while (!usb_hid.ready()) {
     if (!TinyUSBDevice.mounted()) return;
     delay(1);
   }
+  delay(20);
   usb_hid.keyboardRelease(0);
-  delay(5);
+  delay(20);
 }
 
 void KeyboardWrapper::print(const char* str) {
