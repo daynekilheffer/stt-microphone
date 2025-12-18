@@ -10,6 +10,7 @@
             "includePath": [
                 "/Users/dayne/personal/stt-switch-pen/ble-keyboard/include",
                 "/Users/dayne/personal/stt-switch-pen/ble-keyboard/src",
+                "/Users/dayne/.platformio/packages/framework-arduinoespressif32@3.20014.231204/libraries/WiFi/src",
                 "/Users/dayne/personal/stt-switch-pen/ble-keyboard/.pio/libdeps/seeed_xiao_esp32s3/Adafruit TinyUSB Library/src",
                 "/Users/dayne/personal/stt-switch-pen/ble-keyboard/.pio/libdeps/seeed_xiao_esp32s3/SdFat - Adafruit Fork/src",
                 "/Users/dayne/.platformio/packages/framework-arduinoespressif32@3.20014.231204/libraries/SPI/src",
@@ -237,7 +238,6 @@
                 "/Users/dayne/.platformio/packages/framework-arduinoespressif32@3.20014.231204/libraries/USB/src",
                 "/Users/dayne/.platformio/packages/framework-arduinoespressif32@3.20014.231204/libraries/Update/src",
                 "/Users/dayne/.platformio/packages/framework-arduinoespressif32@3.20014.231204/libraries/WebServer/src",
-                "/Users/dayne/.platformio/packages/framework-arduinoespressif32@3.20014.231204/libraries/WiFi/src",
                 "/Users/dayne/.platformio/packages/framework-arduinoespressif32@3.20014.231204/libraries/WiFiClientSecure/src",
                 "/Users/dayne/.platformio/packages/framework-arduinoespressif32@3.20014.231204/libraries/WiFiProv/src",
                 "/Users/dayne/.platformio/packages/framework-arduinoespressif32@3.20014.231204/libraries/Wire/src",
@@ -248,6 +248,7 @@
                 "path": [
                     "/Users/dayne/personal/stt-switch-pen/ble-keyboard/include",
                     "/Users/dayne/personal/stt-switch-pen/ble-keyboard/src",
+                    "/Users/dayne/.platformio/packages/framework-arduinoespressif32@3.20014.231204/libraries/WiFi/src",
                     "/Users/dayne/personal/stt-switch-pen/ble-keyboard/.pio/libdeps/seeed_xiao_esp32s3/Adafruit TinyUSB Library/src",
                     "/Users/dayne/personal/stt-switch-pen/ble-keyboard/.pio/libdeps/seeed_xiao_esp32s3/SdFat - Adafruit Fork/src",
                     "/Users/dayne/.platformio/packages/framework-arduinoespressif32@3.20014.231204/libraries/SPI/src",
@@ -475,7 +476,6 @@
                     "/Users/dayne/.platformio/packages/framework-arduinoespressif32@3.20014.231204/libraries/USB/src",
                     "/Users/dayne/.platformio/packages/framework-arduinoespressif32@3.20014.231204/libraries/Update/src",
                     "/Users/dayne/.platformio/packages/framework-arduinoespressif32@3.20014.231204/libraries/WebServer/src",
-                    "/Users/dayne/.platformio/packages/framework-arduinoespressif32@3.20014.231204/libraries/WiFi/src",
                     "/Users/dayne/.platformio/packages/framework-arduinoespressif32@3.20014.231204/libraries/WiFiClientSecure/src",
                     "/Users/dayne/.platformio/packages/framework-arduinoespressif32@3.20014.231204/libraries/WiFiProv/src",
                     "/Users/dayne/.platformio/packages/framework-arduinoespressif32@3.20014.231204/libraries/Wire/src",

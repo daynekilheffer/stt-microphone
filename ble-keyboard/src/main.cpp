@@ -1,10 +1,15 @@
 #include "./KeyboardWrapper.h"
 #include <WiFi.h>
 #include <esp_now.h>
+#include <esp_wifi.h>
+
+#include <../include/secrets.h>
+
+#ifndef STT_DEBUG
+#define STT_DEBUG 0
+#endif
 
 KeyboardWrapper kboard;
-bool printingEnabled = false;
-bool lastButtonState = HIGH;
 
 // ESP-NOW received data
 volatile bool dataReceived = false;
@@ -18,6 +23,21 @@ void onDataRecv(const uint8_t *mac_addr, const uint8_t *data, int len) {
     dataReceived = true;
   }
 }
+uint8_t getAPChannel(const char* ssid) {
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+  int n = WiFi.scanNetworks();
+  
+  for (int i = 0; i < n; i++) {
+    if (strcmp(WiFi.SSID(i).c_str(), ssid) == 0) {
+      uint8_t channel = WiFi.channel(i);
+      WiFi.scanDelete();
+      return channel;
+    }
+  }
+  WiFi.scanDelete();
+  return 1;  // Default fallback
+}
 
 void setup() {
   pinMode(D8, OUTPUT);
@@ -25,9 +45,25 @@ void setup() {
   kboard.begin();
   digitalWrite(D8, LOW);
 
+  // Flash LED to indicate startup
+  for (int i = 0; i < 3; i++) {
+    digitalWrite(D8, HIGH);
+    delay(100);
+    digitalWrite(D8, LOW);
+    delay(100);
+  }
+
   // Initialize WiFi in station mode for ESP-NOW
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
+  
+  uint8_t channel = getAPChannel(STT_WIFI_SSID);
+  esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+  
+  #if STT_DEBUG
+  kboard.print("ssid: " + String(STT_WIFI_SSID) + ", channel: " + String(channel) + "\n");
+  kboard.print("MAC: " + WiFi.macAddress() + "\n");
+  #endif
 
   // Initialize ESP-NOW
   if (esp_now_init() != ESP_OK) {
@@ -43,42 +79,14 @@ void loop() {
   if (dataReceived) {
     dataReceived = false;
     
+    // Flash LED to indicate message received
+    digitalWrite(D8, HIGH);
+    delay(50);
+    digitalWrite(D8, LOW);
+    delay(50);
+    
     if (kboard.isReady()) {
       kboard.print(receivedMessage);
     }
   }
-
-  // Read button and toggle on press (LOW when pressed)
-  bool buttonState = digitalRead(D10);
-  if (buttonState == LOW && lastButtonState == HIGH) {
-    printingEnabled = !printingEnabled;
-    delay(50); // Debounce
-  }
-  lastButtonState = buttonState;
-
-  if (!kboard.isReady()) return;
-  digitalWrite(D8, printingEnabled ? HIGH : LOW);
-
-  if (!printingEnabled) return;
-
-  static uint32_t lastSendTime = 0;
-
-  if (millis() - lastSendTime <= 5000) {
-    return;
-  }
-  lastSendTime = millis();
-  
-  uint64_t mac = ESP.getEfuseMac();
-
-  char buf[18];
-  snprintf(buf, sizeof(buf),
-         "%02X:%02X:%02X:%02X:%02X:%02X",
-         (uint8_t)(mac >> 40),
-         (uint8_t)(mac >> 32),
-         (uint8_t)(mac >> 24),
-         (uint8_t)(mac >> 16),
-         (uint8_t)(mac >> 8),
-         (uint8_t)(mac));
-
-  kboard.print(buf);
 }
