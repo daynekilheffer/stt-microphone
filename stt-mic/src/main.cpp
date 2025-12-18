@@ -5,137 +5,153 @@
 #include <ArduinoJson.h>
 #include "driver/i2s.h"
 #include "esp_sleep.h"
-#include <BLEDevice.h>
-#include <BLEClient.h>
-#include <BLEUtils.h>
+#include <esp_now.h>
+#include <esp_wifi.h>
 #include "AudioTools.h"
 
 #include "../include/secrets.h"
 
-// BLE configuration
-#define BLE_SERVER_NAME "ESP32 Keyboard Server"
-#define SERVICE_UUID "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
-#define CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
+// ESP-NOW configuration
+uint8_t serverMacAddress[] = STT_KEYBOARD_SERVER_MAC;
 
-#define SLEEP_TIMEOUT_MS 30000  // 30 seconds of inactivity
+#define STT_MIC_SLEEP_TIMEOUT_MS 30000  // 30 seconds of inactivity
+#define STT_MIC_MAX_ESPNOW_PAYLOAD 250  // Maximum ESP-NOW payload size
 
 // I2S mic pins
-#define I2S_WS  3    // LRCLK
-#define I2S_SD  20   // DOUT
-#define I2S_SCK 8    // BCLK
-#define LED_PIN D10
-#define BUTTON_PIN 5
+#define STT_MIC_I2S_WS  3    // LRCLK
+#define STT_MIC_I2S_SD  20   // DOUT
+#define STT_MIC_I2S_SCK 8    // BCLK
+#define STT_MIC_LED_PIN D10
+#define STT_MIC_BUTTON_PIN 5
 
 // Audio settings
-#define SAMPLE_RATE    16000  // 16kHz sample rate for better quality
-#define CHANNELS       1      // Mono
-#define BITS_PER_SAMPLE 16    // 16-bit samples
+#define STT_MIC_SAMPLE_RATE    16000  // 16kHz sample rate for better quality
+#define STT_MIC_CHANNELS       1      // Mono
+#define STT_MIC_BITS_PER_SAMPLE 16    // 16-bit samples
 
 // Buffer settings
-#define CHUNK_SIZE 256  // Reduced from 512 to save memory
+#define STT_MIC_CHUNK_SIZE 256  // Reduced from 512 to save memory
 
 // Audio-tools objects
 I2SStream i2sStream;
 NumberFormatConverterStream converter(i2sStream);
-FilteredStream<int32_t, int16_t> filtered(converter, CHUNK_SIZE / 4);
+FilteredStream<int32_t, int16_t> filtered(converter, STT_MIC_CHUNK_SIZE / 4);
 
 uint32_t lastActivityTime = 0;
 
-// BLE client variables
-BLEClient* pClient = nullptr;
-BLERemoteCharacteristic* pRemoteCharacteristic = nullptr;
-bool bleConnected = false;
-BLEAdvertisedDevice* bleServerDevice = nullptr;
+// ESP-NOW variables
+bool espnowReady = false;
+volatile bool espnowSendSuccess = false;
 
-// BLE callbacks
-class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
-  void onResult(BLEAdvertisedDevice advertisedDevice) {
-    if (advertisedDevice.haveName() && advertisedDevice.getName() == BLE_SERVER_NAME) {
-      Serial.print("Found BLE keyboard server: ");
-      Serial.println(advertisedDevice.toString().c_str());
-      bleServerDevice = new BLEAdvertisedDevice(advertisedDevice);
-      BLEDevice::getScan()->stop();
-    }
+// ESP-NOW callbacks
+void onDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
+  espnowSendSuccess = (status == ESP_NOW_SEND_SUCCESS);
+  Serial.print("ESP-NOW callback - MAC: ");
+  for (int i = 0; i < 6; i++) {
+    Serial.printf("%02X", mac_addr[i]);
+    if (i < 5) Serial.print(":");
   }
-};
-
-class MyClientCallback : public BLEClientCallbacks {
-  void onConnect(BLEClient* pclient) {
-    bleConnected = true;
-    Serial.println("BLE connected");
+  Serial.print(" Status: ");
+  if (status == ESP_NOW_SEND_SUCCESS) {
+    Serial.println("SUCCESS");
+  } else {
+    Serial.print("FAILED (");
+    Serial.print(status);
+    Serial.println(")");
   }
+}
 
-  void onDisconnect(BLEClient* pclient) {
-    bleConnected = false;
-    Serial.println("BLE disconnected");
+bool initESPNow() {
+  Serial.print("Server MAC: ");
+  for (int i = 0; i < 6; i++) {
+    Serial.printf("%02X", serverMacAddress[i]);
+    if (i < 5) Serial.print(":");
   }
-};
-
-bool connectToBLEServer() {
-  if (bleServerDevice == nullptr) {
-    Serial.println("No BLE server device found");
+  Serial.println();
+  
+  // Initialize ESP-NOW
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("ESP-NOW init failed");
     return false;
   }
-
-  Serial.print("Connecting to BLE server: ");
-  Serial.println(bleServerDevice->getAddress().toString().c_str());
-
-  pClient = BLEDevice::createClient();
-  pClient->setClientCallbacks(new MyClientCallback());
-
-  if (!pClient->connect(bleServerDevice)) {
-    Serial.println("Failed to connect to BLE server");
+  
+  Serial.println("ESP-NOW initialized");
+  
+  // Register send callback
+  esp_now_register_send_cb(onDataSent);
+  
+  // Add peer (server)
+  esp_now_peer_info_t peerInfo = {};
+  memcpy(peerInfo.peer_addr, serverMacAddress, 6);
+  peerInfo.channel = 0;  // 0 = use current channel (both devices on same WiFi)
+  peerInfo.encrypt = false;
+  
+  if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+    Serial.println("Failed to add ESP-NOW peer");
     return false;
   }
-
-  Serial.println("Connected to BLE server");
-
-  BLERemoteService* pRemoteService = pClient->getService(SERVICE_UUID);
-  if (pRemoteService == nullptr) {
-    Serial.println("Failed to find service UUID");
-    pClient->disconnect();
-    return false;
-  }
-
-  pRemoteCharacteristic = pRemoteService->getCharacteristic(CHARACTERISTIC_UUID);
-  if (pRemoteCharacteristic == nullptr) {
-    Serial.println("Failed to find characteristic UUID");
-    pClient->disconnect();
-    return false;
-  }
-
-  Serial.println("BLE characteristic ready");
-  bleConnected = true;
+  
+  Serial.println("ESP-NOW peer added");
+  espnowReady = true;
   return true;
 }
 
-void sendTextViaBLE(const char* text) {
-  if (!bleConnected || pRemoteCharacteristic == nullptr) {
-    Serial.println("BLE not connected, attempting to connect...");
-    if (!connectToBLEServer()) {
-      Serial.println("Failed to connect to BLE server");
-      return;
-    }
+void sendTextToKeyboard(const char* text) {
+  if (!espnowReady) {
+    Serial.println("ESP-NOW not ready");
+    return;
   }
-
-  try {
-    pRemoteCharacteristic->writeValue(text, strlen(text));
-    Serial.println("Text sent via BLE");
-  } catch (...) {
-    Serial.println("Failed to send text via BLE");
-    bleConnected = false;
+  
+  size_t textLen = strlen(text);
+  Serial.print("Sending text (");
+  Serial.print(textLen);
+  Serial.println(" bytes) via ESP-NOW...");
+  
+  size_t offset = 0;
+  
+  // Send in chunks if text is too long
+  while (offset < textLen) {
+    size_t chunkLen = min((size_t)STT_MIC_MAX_ESPNOW_PAYLOAD, textLen - offset);
+    
+    espnowSendSuccess = false;
+    esp_err_t result = esp_now_send(serverMacAddress, (uint8_t*)(text + offset), chunkLen);
+    
+    if (result == ESP_OK) {
+      // Wait for send callback (with timeout)
+      unsigned long timeout = millis();
+      while (!espnowSendSuccess && (millis() - timeout < 1000)) {
+        delay(10);
+      }
+      
+      if (espnowSendSuccess) {
+        Serial.print("Sent ");
+        Serial.print(chunkLen);
+        Serial.println(" bytes via ESP-NOW");
+      } else {
+        Serial.print("ESP-NOW send timeout at offset ");
+        Serial.println(offset);
+        break;
+      }
+    } else {
+      Serial.print("ESP-NOW send error: ");
+      Serial.println(result);
+      break;
+    }
+    
+    offset += chunkLen;
+    delay(50);  // Small delay between chunks
   }
 }
 
 void setup() {
-  Serial.begin(SERIAL_BAUD);
+  Serial.begin(STT_MIC_SERIAL_BAUD);
 
-  pinMode(BUTTON_PIN, INPUT_PULLUP);
-  pinMode(LED_PIN, OUTPUT);
+  pinMode(STT_MIC_BUTTON_PIN, INPUT_PULLUP);
+  pinMode(STT_MIC_LED_PIN, OUTPUT);
 
   // Configure wake up source for ESP32-C3 deep sleep
   // Use RTC GPIO wakeup - wakes when GPIO goes LOW (button press)
-  uint64_t wakeup_pin_mask = (1ULL << BUTTON_PIN);
+  uint64_t wakeup_pin_mask = (1ULL << STT_MIC_BUTTON_PIN);
   esp_deep_sleep_enable_gpio_wakeup(wakeup_pin_mask, ESP_GPIO_WAKEUP_GPIO_LOW);
 
   // Check if we woke from deep sleep
@@ -145,23 +161,30 @@ void setup() {
   }
 
   // WiFi
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  WiFi.begin(STT_MIC_WIFI_SSID, STT_MIC_WIFI_PASS);
   Serial.print("Connecting");
   while (WiFi.status() != WL_CONNECTED) {
     delay(200);
     Serial.print(".");
   }
   Serial.println("\nWiFi connected.");
+  
+  // determine the channel we're on
+  uint8_t channel;
+  wifi_second_chan_t second;
+  esp_wifi_get_channel(&channel, &second);
+  Serial.print("WiFi connected on channel: ");
+  Serial.println(channel);
 
   // Configure I2S stream with audio-tools
   auto i2s_config = i2sStream.defaultConfig(RX_MODE);
-  i2s_config.sample_rate = SAMPLE_RATE;
+  i2s_config.sample_rate = STT_MIC_SAMPLE_RATE;
   i2s_config.bits_per_sample = 32;  // Most MEMS mics output 32-bit
-  i2s_config.channels = CHANNELS;
+  i2s_config.channels = STT_MIC_CHANNELS;
   i2s_config.i2s_format = I2S_STD_FORMAT;
-  i2s_config.pin_bck = I2S_SCK;
-  i2s_config.pin_ws = I2S_WS;
-  i2s_config.pin_data = I2S_SD;
+  i2s_config.pin_bck = STT_MIC_I2S_SCK;
+  i2s_config.pin_ws = STT_MIC_I2S_WS;
+  i2s_config.pin_data = STT_MIC_I2S_SD;
   i2s_config.use_apll = false;
   i2s_config.auto_clear = true;
   
@@ -171,27 +194,13 @@ void setup() {
   converter.begin(32, 16);  // from_bits, to_bits
   filtered.begin();
 
-  // Initialize BLE, scan for device, then deinitialize to save memory
-  Serial.println("Initializing BLE client...");
-  BLEDevice::init("");
-  BLEScan* pBLEScan = BLEDevice::getScan();
-  pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
-  pBLEScan->setActiveScan(true);
-  pBLEScan->setInterval(100);
-  pBLEScan->setWindow(99);
-  
-  Serial.println("Scanning for BLE keyboard server...");
-  pBLEScan->start(5, false);
-  
-  if (bleServerDevice != nullptr) {
-    Serial.println("BLE keyboard server found");
+  // Initialize ESP-NOW
+  Serial.println("Initializing ESP-NOW...");
+  if (initESPNow()) {
+    Serial.println("ESP-NOW ready");
   } else {
-    Serial.println("BLE keyboard server not found");
+    Serial.println("ESP-NOW initialization failed");
   }
-  
-  // Deinitialize BLE to free memory - we'll reinit when needed
-  Serial.println("Deinitializing BLE to save memory...");
-  BLEDevice::deinit(false);
   
   Serial.println("Setup complete.");
   
@@ -207,20 +216,10 @@ void recordAndStreamUpload() {
   }
 
   Serial.println("Streaming audio...");
-  digitalWrite(LED_PIN, HIGH);
+  digitalWrite(STT_MIC_LED_PIN, HIGH);
 
   // Determine if we need HTTPS or HTTP
   bool useHttps = (strcmp(STT_ENDPOINT_PROTOCOL, "https") == 0);
-  
-  // Temporarily deinit BLE to free memory for SSL (only if using HTTPS)
-  if (useHttps && bleConnected) {
-    Serial.println("Disconnecting BLE to free memory for SSL...");
-    if (pClient != nullptr) {
-      pClient->disconnect();
-    }
-    BLEDevice::deinit(false);
-    delay(100);
-  }
 
   // Create appropriate client based on protocol
   WiFiClient* client;
@@ -239,7 +238,7 @@ void recordAndStreamUpload() {
   
   if (!client->connect(STT_ENDPOINT_HOST, STT_ENDPOINT_PORT)) {
     Serial.println("Connection failed");
-    digitalWrite(LED_PIN, LOW);
+    digitalWrite(STT_MIC_LED_PIN, LOW);
     return;
   }
 
@@ -253,11 +252,11 @@ void recordAndStreamUpload() {
   client->println(STT_ENDPOINT_PORT);
   client->println("Content-Type: audio/l16");
   client->print("X-Dayne-Sample-Rate: ");
-  client->println(SAMPLE_RATE);
+  client->println(STT_MIC_SAMPLE_RATE);
   client->print("X-Dayne-Channels: ");
-  client->println(CHANNELS);
+  client->println(STT_MIC_CHANNELS);
   client->print("X-Dayne-Bits-Per-Sample: ");
-  client->println(BITS_PER_SAMPLE);
+  client->println(STT_MIC_BITS_PER_SAMPLE);
   client->println("Transfer-Encoding: chunked");
   client->println("Connection: close");
   client->println();  // End of headers
@@ -272,11 +271,11 @@ void recordAndStreamUpload() {
   uint32_t startTime = millis();
   size_t totalBytes = 0;
   size_t totalChunks = 0;
-  uint8_t chunk[CHUNK_SIZE];
+  uint8_t chunk[STT_MIC_CHUNK_SIZE];
   
-  while (digitalRead(BUTTON_PIN) == LOW) {
+  while (digitalRead(STT_MIC_BUTTON_PIN) == LOW) {
     // Read from filtered stream (already converted to 16-bit)
-    size_t bytesRead = filtered.readBytes(chunk, CHUNK_SIZE);
+    size_t bytesRead = filtered.readBytes(chunk, STT_MIC_CHUNK_SIZE);
     
     if (bytesRead > 0) {
       // Send as HTTP chunk: size in hex + CRLF + data + CRLF
@@ -327,7 +326,7 @@ void recordAndStreamUpload() {
   client->flush();  // Ensure final chunk is sent
   
   uint32_t duration = millis() - startTime;
-  digitalWrite(LED_PIN, LOW);
+  digitalWrite(STT_MIC_LED_PIN, LOW);
   Serial.print("Streaming stopped. Duration: ");
   Serial.print(duration);
   Serial.print(" ms, Bytes: ");
@@ -367,13 +366,6 @@ void recordAndStreamUpload() {
   client->stop();;
   Serial.println("Response: " + response);
   
-  // Re-initialize BLE after SSL is done (only if we deinit'd it)
-  if (useHttps) {
-    Serial.println("Re-initializing BLE...");
-    BLEDevice::init("");
-    delay(100);
-  }
-  
   // Parse JSON
   JsonDocument doc;
   DeserializationError error = deserializeJson(doc, response);
@@ -387,23 +379,17 @@ void recordAndStreamUpload() {
     Serial.println(transcription);
     Serial.println("=====================\n");
     
-    // Reconnect to BLE server if needed
-    if (!bleConnected && bleServerDevice != nullptr) {
-      Serial.println("Reconnecting to BLE server...");
-      connectToBLEServer();
-    }
-    
-    sendTextViaBLE(transcription);
+    sendTextToKeyboard(transcription);
   }
 }
 
 // ------------------------- LOOP --------------------------
 void loop() {
 
-  if (digitalRead(BUTTON_PIN) == LOW) {
+  if (digitalRead(STT_MIC_BUTTON_PIN) == LOW) {
     delay(30);  // debounce
 
-    if (digitalRead(BUTTON_PIN) == LOW) {
+    if (digitalRead(STT_MIC_BUTTON_PIN) == LOW) {
       lastActivityTime = millis();  // Update activity time
       recordAndStreamUpload();
       delay(500);
@@ -412,13 +398,13 @@ void loop() {
   }
 
   // Check for inactivity timeout
-  if (millis() - lastActivityTime > SLEEP_TIMEOUT_MS) {
+  if (millis() - lastActivityTime > STT_MIC_SLEEP_TIMEOUT_MS) {
     Serial.println("Entering deep sleep due to inactivity...");
     Serial.flush();  // Make sure message is sent
     delay(100);
     
     // Turn off LED
-    digitalWrite(LED_PIN, LOW);
+    digitalWrite(STT_MIC_LED_PIN, LOW);
     
     // Enter deep sleep
     esp_deep_sleep_start();
