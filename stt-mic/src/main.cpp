@@ -43,6 +43,10 @@ uint32_t lastActivityTime = 0;
 bool espnowReady = false;
 volatile bool espnowSendSuccess = false;
 
+// WiFi client objects (global to preserve TLS session cache)
+WiFiClient httpClient;
+WiFiClientSecure httpsClient;
+
 // ESP-NOW callbacks
 void onDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
   espnowSendSuccess = (status == ESP_NOW_SEND_SUCCESS);
@@ -210,37 +214,40 @@ void setup() {
 
 // -------------------- STREAMING RECORD & UPLOAD -----------------------
 void recordAndStreamUpload() {
+  uint32_t funcStart = millis();
+  
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("WiFi lost.");
+    Serial.printf("[%lu] WiFi lost.\n", millis() - funcStart);
     return;
   }
 
-  Serial.println("Streaming audio...");
+  Serial.printf("[%lu] Streaming audio...\n", millis() - funcStart);
   digitalWrite(STT_MIC_LED_PIN, HIGH);
 
   // Determine if we need HTTPS or HTTP
   bool useHttps = (strcmp(STT_ENDPOINT_PROTOCOL, "https") == 0);
 
-  // Create appropriate client based on protocol
+  // Use global client objects to preserve TLS session cache
   WiFiClient* client;
-  WiFiClient httpClient;
-  WiFiClientSecure httpsClient;
   
   if (useHttps) {
-    Serial.println("Using HTTPS...");
+    Serial.printf("[%lu] Using HTTPS...\n", millis() - funcStart);
     httpsClient.setInsecure();  // Skip certificate verification (use for development)
     // For production, use: httpsClient.setCACert(root_ca);
     client = &httpsClient;
   } else {
-    Serial.println("Using HTTP...");
+    Serial.printf("[%lu] Using HTTP...\n", millis() - funcStart);
     client = &httpClient;
   }
   
+  Serial.printf("[%lu] starting connection\n", millis() - funcStart);
   if (!client->connect(STT_ENDPOINT_HOST, STT_ENDPOINT_PORT)) {
-    Serial.println("Connection failed");
+    Serial.printf("[%lu] Connection failed\n", millis() - funcStart);
     digitalWrite(STT_MIC_LED_PIN, LOW);
     return;
   }
+  
+  Serial.printf("[%lu] Connection established\n", millis() - funcStart);
 
   // Send HTTP headers manually
   client->print("POST ");
@@ -265,7 +272,7 @@ void recordAndStreamUpload() {
   // Give server time to process headers
   delay(20);
   
-  Serial.println("Starting audio streaming...");
+  Serial.printf("[%lu] Starting audio streaming...\n", millis() - funcStart);
 
   // Stream audio while button is pressed
   uint32_t startTime = millis();
@@ -288,7 +295,7 @@ void recordAndStreamUpload() {
       
       // Check if write succeeded
       if (headerWritten == 0 || dataWritten != bytesRead || trailerWritten == 0) {
-        Serial.println("Write failed!");
+        Serial.printf("[%lu] Write failed!\n", millis() - funcStart);
         Serial.print("Header: "); Serial.print(headerWritten);
         Serial.print(", Data: "); Serial.print(dataWritten);
         Serial.print(", Trailer: "); Serial.println(trailerWritten);
@@ -306,13 +313,13 @@ void recordAndStreamUpload() {
     
     // Safety timeout (max 10 seconds)
     if (millis() - startTime > 10000) {
-      Serial.println("Max streaming time reached");
+      Serial.printf("[%lu] Max streaming time reached\n", millis() - funcStart);
       break;
     }
     
     // Check connection
     if (!client->connected()) {
-      Serial.print("Connection lost at ");
+      Serial.printf("[%lu] Connection lost at ", millis() - funcStart);
       Serial.print(totalBytes);
       Serial.println(" bytes");
       break;
@@ -321,13 +328,15 @@ void recordAndStreamUpload() {
     yield();
   }
   
+  Serial.printf("[%lu] Sending final chunk...\n", millis() - funcStart);
   // Send final chunk (size 0) to signal end
   client->print("0\r\n\r\n");
   client->flush();  // Ensure final chunk is sent
+  Serial.printf("[%lu] Final chunk flushed\n", millis() - funcStart);
   
   uint32_t duration = millis() - startTime;
   digitalWrite(STT_MIC_LED_PIN, LOW);
-  Serial.print("Streaming stopped. Duration: ");
+  Serial.printf("[%lu] Streaming stopped. Duration: ", millis() - funcStart);
   Serial.print(duration);
   Serial.print(" ms, Bytes: ");
   Serial.print(totalBytes);
@@ -335,47 +344,63 @@ void recordAndStreamUpload() {
   Serial.println(totalChunks);
 
   // Read response
-  Serial.println("Reading response...");
+  Serial.printf("[%lu] Reading response...\n", millis() - funcStart);
+  
+  // Read status line immediately (don't wait for available())
+  String statusLine = "";
   unsigned long timeout = millis();
-  while (client->available() == 0) {
-    if (millis() - timeout > 5000) {
-      Serial.println("Response timeout");
-      client->stop();
-      return;
+  while (statusLine.length() == 0 && (millis() - timeout < 5000)) {
+    if (client->connected()) {
+      statusLine = client->readStringUntil('\n');
     }
-    delay(10);
+    if (statusLine.length() == 0) delay(10);
   }
-
-  // Read status line
-  String statusLine = client->readStringUntil('\n');
-  Serial.print("HTTP Status: ");
+  
+  if (statusLine.length() == 0) {
+    Serial.printf("[%lu] Response timeout\n", millis() - funcStart);
+    client->stop();
+    return;
+  }
+  
+  Serial.printf("[%lu] HTTP Status: ", millis() - funcStart);
   Serial.println(statusLine);
 
   // Skip headers
-  while (client->available()) {
+  timeout = millis();
+  while (client->connected() && (millis() - timeout < 2000)) {
     String line = client->readStringUntil('\n');
     if (line == "\r") break;  // End of headers
+    if (line.length() == 0) delay(10);
   }
 
   // Read response body
   String response = "";
-  while (client->available()) {
-    response += client->readString();
+  timeout = millis();
+  while (client->connected() && (millis() - timeout < 2000)) {
+    if (client->available()) {
+      char c = client->read();
+      response += c;
+    } else {
+      delay(10);
+    }
+    // Check if we have complete JSON
+    if (response.endsWith("}")) break;
   }
   
-  client->stop();;
-  Serial.println("Response: " + response);
+  client->stop();
+  Serial.printf("[%lu] Response: ", millis() - funcStart);
+  Serial.println(response);
   
   // Parse JSON
   JsonDocument doc;
   DeserializationError error = deserializeJson(doc, response);
   
   if (error) {
-    Serial.print("JSON parse error: ");
+    Serial.printf("[%lu] JSON parse error: ", millis() - funcStart);
     Serial.println(error.c_str());
   } else if (!doc["text"].isNull()) {
     const char* transcription = doc["text"];
-    Serial.println("\n=== Transcription ===");
+    Serial.printf("[%lu] \n=== Transcription ===\n", millis() - funcStart);
     Serial.println(transcription);
     Serial.println("=====================\n");
     
