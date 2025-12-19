@@ -4,18 +4,11 @@ A speech-to-text system consisting of three sub-projects that work together to c
 
 ## System Architecture
 
-```
-┌─────────────┐     ESP-NOW       ┌──────────────┐        USB      ┌──────────┐
-│  stt-mic    │ ─────────────────>│ esp-keyboard │ ───────────────>│  Switch  │
-│  (Audio)    │                   │ (HID USB)    │                 │          │
-└──────┬──────┘                   └──────────────┘                 └──────────┘
-       │ HTTP/S
-       │
-       v
-┌─────────────┐
-│stt-endpoint │
-│ (Cloud STT) │
-└─────────────┘
+```mermaid
+graph LR
+    A[stt-mic<br/>Audio] -->|ESP-NOW| B[esp-keyboard<br/>HID USB]
+    B -->|USB| C[Switch]
+    A -->|HTTP/S| D[stt-endpoint<br/>Cloud STT]
 ```
 
 ## Sub-Projects
