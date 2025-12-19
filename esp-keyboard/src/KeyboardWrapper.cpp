@@ -39,43 +39,71 @@ bool KeyboardWrapper::isReady() {
 }
 
 void KeyboardWrapper::sendKey(uint8_t keycode, uint8_t modifier) {
-  while (!usb_hid.ready()) {
-    if (!TinyUSBDevice.mounted()) return;
-    delay(1);
-  }
-
+  if (!usb_hid.ready() || !TinyUSBDevice.mounted()) return;
+  
   if (TinyUSBDevice.suspended()) {
     TinyUSBDevice.remoteWakeup();
   }
 
   uint8_t keycodes[6] = {keycode, 0, 0, 0, 0, 0};
   usb_hid.keyboardReport(0, modifier, keycodes);
-  delay(20);
-  while (!usb_hid.ready()) {
-    if (!TinyUSBDevice.mounted()) return;
-    delay(1);
+}
+
+void KeyboardWrapper::task() {
+  if (!TinyUSBDevice.mounted() || !pendingStr) return;
+  
+  // State machine for non-blocking character sending
+  switch (keyState) {
+    case IDLE:
+      if (pendingStr[pendingIndex] == '\0') {
+        // Done with string
+        pendingStr = nullptr;
+        pendingIndex = 0;
+        return;
+      }
+      
+      // Send next character
+      if (usb_hid.ready()) {
+        uint8_t c = (uint8_t)pendingStr[pendingIndex];
+        
+        if (c <= 127) {
+          uint8_t const conv_table[128][2] = { HID_ASCII_TO_KEYCODE };
+          uint8_t keycode = conv_table[c][1];
+          
+          if (keycode != 0) {
+            uint8_t modifier = conv_table[c][0] ? KEYBOARD_MODIFIER_LEFTSHIFT : 0;
+            sendKey(keycode, modifier);
+            keyState = PRESS_SENT;
+            return;
+          }
+        }
+        
+        // move to next character
+        pendingIndex++;
+      }
+      break;
+      
+    case PRESS_SENT:
+      if (usb_hid.ready()) {
+        usb_hid.keyboardRelease(0);
+        keyState = WAITING_FOR_RELEASE;
+      }
+      break;
+      
+    case WAITING_FOR_RELEASE:
+      if (usb_hid.ready()) {
+        keyState = IDLE;
+        pendingIndex++;
+      }
+      break;
   }
-  delay(20);
-  usb_hid.keyboardRelease(0);
-  delay(20);
 }
 
 void KeyboardWrapper::print(const char* str) {
-  for (size_t i = 0; str[i] != '\0'; i++) {
-    uint8_t c = (uint8_t)str[i];
-    
-    // Skip characters outside the lookup table range
-    if (c > 127) continue;
-    
-    uint8_t const conv_table[128][2] =  { HID_ASCII_TO_KEYCODE };
-    uint8_t modifier   = 0;
-    uint8_t keycode = conv_table[c][1];
-    if ( conv_table[c][0] ) modifier = KEYBOARD_MODIFIER_LEFTSHIFT;
-    
-    if (keycode != 0) {
-      sendKey(keycode, modifier);
-    }
-  }
+  // Queue the string for non-blocking sending
+  pendingStr = str;
+  pendingIndex = 0;
+  keyState = IDLE;
 }
 
 void KeyboardWrapper::print(String str) {

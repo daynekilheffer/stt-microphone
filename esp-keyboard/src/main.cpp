@@ -75,6 +75,9 @@ void setup() {
 }
 
 void loop() {
+  // Call keyboard task for non-blocking character sending
+  kboard.task();
+  
   // Handle received ESP-NOW data
   if (dataReceived) {
     dataReceived = false;
