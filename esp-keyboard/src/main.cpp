@@ -78,6 +78,20 @@ void loop() {
   // Call keyboard task for non-blocking character sending
   kboard.task();
   
+  if (digitalRead(D10) == LOW) {
+    // Flash LED to indicate button press
+    digitalWrite(D8, HIGH);
+    delay(50);
+    digitalWrite(D8, LOW);
+    delay(50);
+    
+    if (kboard.isReady()) {
+      kboard.print("pressed lorem ipsum");
+    }
+    // Debounce delay
+    delay(300);
+  }
+
   // Handle received ESP-NOW data
   if (dataReceived) {
     dataReceived = false;

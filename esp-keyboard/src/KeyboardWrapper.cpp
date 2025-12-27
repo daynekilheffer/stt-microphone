@@ -4,7 +4,34 @@ uint8_t const desc_hid_report[] = {
     TUD_HID_REPORT_DESC_KEYBOARD()
 };
 
+volatile bool KeyboardWrapper::reportConsumed = true;
+
+static volatile uint32_t callbackCount = 0;
+
+// Quick LED pulse for debugging (non-blocking)
+static void ledPulse(uint8_t pin, int count) {
+  for (int i = 0; i < count; i++) {
+    digitalWrite(pin, HIGH);
+    delay(30);
+    digitalWrite(pin, LOW);
+    if (i < count - 1) delay(30);
+  }
+}
+
 KeyboardWrapper::KeyboardWrapper() {
+}
+
+void KeyboardWrapper::onReportComplete(uint8_t instance, uint8_t const* report, uint16_t len) {
+  (void)instance;
+  (void)report;
+  (void)len;
+  callbackCount++;
+  reportConsumed = true;
+}
+
+// TinyUSB callback for HID report complete
+extern "C" void tud_hid_report_complete_cb(uint8_t instance, uint8_t const* report, uint16_t len) {
+  KeyboardWrapper::onReportComplete(instance, report, len);
 }
 
 void KeyboardWrapper::begin() {
@@ -56,14 +83,22 @@ void KeyboardWrapper::task() {
   switch (keyState) {
     case IDLE:
       if (pendingStr[pendingIndex] == '\0') {
-        // Done with string
+        // Done with string - show status with LED
+        // Quick blink = callbacks working, Long blink = timeouts
+        if (callbackCount > 0) {
+          ledPulse(D8, 2);  // 2 quick blinks = callbacks work
+        } else {
+          digitalWrite(D8, HIGH);
+          delay(1500);  // Long blink = all timeouts
+          digitalWrite(D8, LOW);
+        }
         pendingStr = nullptr;
         pendingIndex = 0;
         return;
       }
       
       // Send next character
-      if (usb_hid.ready()) {
+      if (usb_hid.ready() && (millis() - lastCharComplete >= CHAR_SPACING_MS)) {
         uint8_t c = (uint8_t)pendingStr[pendingIndex];
         
         if (c <= 127) {
@@ -72,6 +107,7 @@ void KeyboardWrapper::task() {
           
           if (keycode != 0) {
             uint8_t modifier = conv_table[c][0] ? KEYBOARD_MODIFIER_LEFTSHIFT : 0;
+            reportConsumed = false;
             sendKey(keycode, modifier);
             keyState = PRESS_SENT;
             return;
@@ -84,14 +120,30 @@ void KeyboardWrapper::task() {
       break;
       
     case PRESS_SENT:
-      if (usb_hid.ready()) {
-        usb_hid.keyboardRelease(0);
-        keyState = WAITING_FOR_RELEASE;
+      if (reportConsumed && usb_hid.ready()) {
+        stateTimer = millis();
+        keyState = PRESS_WAIT;
       }
       break;
       
-    case WAITING_FOR_RELEASE:
-      if (usb_hid.ready()) {
+    case PRESS_WAIT:
+      if (millis() - stateTimer >= PRESS_HOLD_MS) {
+        reportConsumed = false;
+        usb_hid.keyboardRelease(0);
+        keyState = RELEASE_SENT;
+      }
+      break;
+      
+    case RELEASE_SENT:
+      if (reportConsumed && usb_hid.ready()) {
+        stateTimer = millis();
+        keyState = RELEASE_WAIT;
+      }
+      break;
+      
+    case RELEASE_WAIT:
+      if (millis() - stateTimer >= RELEASE_HOLD_MS) {
+        lastCharComplete = millis();
         keyState = IDLE;
         pendingIndex++;
       }
@@ -104,6 +156,7 @@ void KeyboardWrapper::print(const char* str) {
   pendingStr = str;
   pendingIndex = 0;
   keyState = IDLE;
+  callbackCount = 0;
 }
 
 void KeyboardWrapper::print(String str) {
