@@ -21,7 +21,7 @@ uint8_t serverMacAddress[] = STT_KEYBOARD_SERVER_MAC;
 #define STT_MIC_I2S_WS  3    // LRCLK
 #define STT_MIC_I2S_SD  20   // DOUT
 #define STT_MIC_I2S_SCK 8    // BCLK
-#define STT_MIC_LED_PIN D10
+#define STT_MIC_LED_PIN D9
 #define STT_MIC_BUTTON_PIN 5
 
 // Audio settings
@@ -152,6 +152,7 @@ void setup() {
 
   pinMode(STT_MIC_BUTTON_PIN, INPUT_PULLUP);
   pinMode(STT_MIC_LED_PIN, OUTPUT);
+  digitalWrite(STT_MIC_LED_PIN, LOW);
 
   // Configure wake up source for ESP32-C3 deep sleep
   // Use RTC GPIO wakeup - wakes when GPIO goes LOW (button press)
@@ -222,7 +223,6 @@ void recordAndStreamUpload() {
   }
 
   Serial.printf("[%lu] Streaming audio...\n", millis() - funcStart);
-  digitalWrite(STT_MIC_LED_PIN, HIGH);
 
   // Determine if we need HTTPS or HTTP
   bool useHttps = (strcmp(STT_ENDPOINT_PROTOCOL, "https") == 0);
@@ -273,6 +273,7 @@ void recordAndStreamUpload() {
   delay(20);
   
   Serial.printf("[%lu] Starting audio streaming...\n", millis() - funcStart);
+  digitalWrite(STT_MIC_LED_PIN, HIGH);
 
   // Stream audio while button is pressed
   uint32_t startTime = millis();
@@ -431,6 +432,10 @@ void loop() {
     // Turn off LED
     digitalWrite(STT_MIC_LED_PIN, LOW);
     
+    // Hold GPIO state during deep sleep
+    gpio_hold_en((gpio_num_t)STT_MIC_LED_PIN);
+    gpio_deep_sleep_hold_en();
+
     // Enter deep sleep
     esp_deep_sleep_start();
   }
