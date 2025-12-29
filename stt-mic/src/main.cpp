@@ -163,6 +163,8 @@ void setup() {
   esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
   if (wakeup_reason == ESP_SLEEP_WAKEUP_GPIO) {
     Serial.println("Woke from deep sleep via button");
+    gpio_deep_sleep_hold_dis();  // Release GPIO hold after waking
+    gpio_hold_dis((gpio_num_t)STT_MIC_LED_PIN);  // Disable hold on LED pin
   }
 
   // WiFi
