@@ -1,8 +1,6 @@
-# STT Switch Pen
+# STT Microphone
 
 A speech-to-text system consisting of three sub-projects that work together to capture audio, transcribe it using Google Cloud Speech-to-Text, and output the transcribed text via ESP-NOW to a keyboard emulator connected to the Nintendo Switch 2.
-
-_"pen" in the name comes from the original desire for the device to be pen shaped, but without custom pcb, it's a bit bigger than that at the moment_
 
 ## System Architecture
 
