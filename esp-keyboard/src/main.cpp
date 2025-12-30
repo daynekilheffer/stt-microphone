@@ -9,6 +9,10 @@
 #define STT_DEBUG 0
 #endif
 
+#ifndef STT_BUTTON_DEBUG
+#define STT_BUTTON_DEBUG 0
+#endif
+
 KeyboardWrapper kboard;
 
 // ESP-NOW received data
@@ -41,7 +45,9 @@ uint8_t getAPChannel(const char* ssid) {
 
 void setup() {
   pinMode(D8, OUTPUT);
+  #ifdef STT_BUTTON_DEBUG
   pinMode(D10, INPUT_PULLUP);
+  #endif
   kboard.begin();
   digitalWrite(D8, LOW);
 
@@ -78,6 +84,7 @@ void loop() {
   // Call keyboard task for non-blocking character sending
   kboard.task();
   
+  #ifdef STT_BUTTON_DEBUG
   if (digitalRead(D10) == LOW) {
     // Flash LED to indicate button press
     digitalWrite(D8, HIGH);
@@ -91,6 +98,7 @@ void loop() {
     // Debounce delay
     delay(300);
   }
+  #endif
 
   // Handle received ESP-NOW data
   if (dataReceived) {
