@@ -31,6 +31,10 @@ graph LR
 - ESP-NOW for low-latency local communication
 - WiFi for cloud connectivity
 
+**Additional References:**
+- [breadboard](./docs/stt-mic-breadboard.jpeg)
+- [schematic](./docs/SCH_mic_schematic.png)
+
 ### 2. stt-endpoint
 **Purpose:** Cloud-based speech recognition service
 
